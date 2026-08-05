@@ -8,8 +8,10 @@ import pytest
 from earth_rover.planning.motion_primitive_planner import (
     MotionPrimitivePlanner,
     MotionPrimitivePlannerConfig,
+    image_direction_from_x_offset,
     normalize_angle_deg,
     primitive_curve_points,
+    selected_candidate_endpoint_x_offset_px,
 )
 
 
@@ -70,6 +72,50 @@ def test_selects_straight_when_gps_and_score_prefer_straight() -> None:
     assert plan.selected_candidate is not None
     assert plan.selected_candidate.heading_deg == pytest.approx(0.0)
     assert plan.image_path.reason == "MOTION_PRIMITIVE_SELECTED"
+
+
+def test_candidate_geometry_uses_positive_clockwise_right_convention() -> None:
+    shape = (120, 160)
+
+    right = primitive_curve_points(shape, 30.0)
+    left = primitive_curve_points(shape, -30.0)
+    straight = primitive_curve_points(shape, 0.0)
+
+    right_offset = selected_candidate_endpoint_x_offset_px(right)
+    left_offset = selected_candidate_endpoint_x_offset_px(left)
+    straight_offset = selected_candidate_endpoint_x_offset_px(straight)
+
+    assert right_offset > 0
+    assert left_offset < 0
+    assert abs(straight_offset) <= 1
+    assert image_direction_from_x_offset(right_offset) == "RIGHT"
+    assert image_direction_from_x_offset(left_offset) == "LEFT"
+    assert image_direction_from_x_offset(straight_offset) == "CENTER"
+
+
+def test_positive_gps_error_selects_right_image_candidate() -> None:
+    clock = Clock()
+    local = planner(clock)
+    score, valid = score_map_for_heading(30.0)
+
+    plan = local.plan(score, valid, target_heading_error_rad=math.radians(30.0))
+
+    assert plan.selected_candidate is not None
+    assert plan.selected_candidate.heading_deg > 0.0
+    assert plan.to_status()["heading_convention"] == "positive_clockwise_right"
+    assert plan.to_status()["selected_candidate_image_direction"] == "RIGHT"
+
+
+def test_negative_gps_error_selects_left_image_candidate() -> None:
+    clock = Clock()
+    local = planner(clock)
+    score, valid = score_map_for_heading(-30.0)
+
+    plan = local.plan(score, valid, target_heading_error_rad=math.radians(-30.0))
+
+    assert plan.selected_candidate is not None
+    assert plan.selected_candidate.heading_deg < 0.0
+    assert plan.to_status()["selected_candidate_image_direction"] == "LEFT"
 
 
 def test_uses_adjacent_safe_candidate_when_straight_near_field_is_dangerous() -> None:

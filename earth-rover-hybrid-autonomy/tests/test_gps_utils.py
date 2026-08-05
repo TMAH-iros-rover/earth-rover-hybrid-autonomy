@@ -23,11 +23,24 @@ def test_east_bearing_is_ninety_degrees():
 def test_angle_normalization():
     assert normalize_angle_deg(181.0) == pytest_approx(-179.0)
     assert normalize_angle_deg(-181.0) == pytest_approx(179.0)
+    assert normalize_angle_deg(90.0) == pytest_approx(90.0)
+    assert normalize_angle_deg(270.0) == pytest_approx(-90.0)
+    assert normalize_angle_deg(10.0 - 350.0) == pytest_approx(20.0)
+    assert normalize_angle_deg(350.0 - 10.0) == pytest_approx(-20.0)
     assert normalize_angle_rad(3.5) == pytest_approx(3.5 - 2 * math.pi)
+
+
+def test_compass_heading_error_physical_direction_examples():
+    # heading_error = target_bearing - current_heading, normalized.
+    # With compass angles, positive is clockwise, i.e. physical right.
+    assert normalize_angle_deg(90.0 - 0.0) == pytest_approx(90.0)
+    assert normalize_angle_deg(270.0 - 0.0) == pytest_approx(-90.0)
+    assert normalize_angle_deg(0.0 - 90.0) == pytest_approx(-90.0)
+    assert normalize_angle_deg(10.0 - 350.0) == pytest_approx(20.0)
+    assert normalize_angle_deg(350.0 - 10.0) == pytest_approx(-20.0)
 
 
 def pytest_approx(*args, **kwargs):
     import pytest
 
     return pytest.approx(*args, **kwargs)
-

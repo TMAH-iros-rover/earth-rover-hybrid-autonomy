@@ -100,9 +100,13 @@ class CandidateScore:
     points_uv: np.ndarray = field(repr=False)
 
     def to_status(self) -> dict[str, Any]:
+        endpoint_x_offset = selected_candidate_endpoint_x_offset_px(self.points_uv)
         return {
             "index": self.index,
             "heading_deg": self.heading_deg,
+            "heading_convention": "positive_clockwise_right",
+            "image_direction": image_direction_from_x_offset(endpoint_x_offset),
+            "endpoint_x_offset_px": endpoint_x_offset,
             "traversability": self.traversability_weighted_mean,
             "traversability_low_percentile": self.traversability_low_percentile,
             "near_field": self.near_field_low_percentile,
@@ -150,6 +154,7 @@ class MotionPrimitivePlan:
         )
         status = {
             "mode": self.mode,
+            "heading_convention": "positive_clockwise_right",
             "selected_candidate_index": (
                 self.selected_candidate.index if self.selected_candidate is not None else None
             ),
@@ -158,6 +163,18 @@ class MotionPrimitivePlan:
             ),
             "selected_candidate_score": (
                 self.selected_candidate.final_score if self.selected_candidate is not None else None
+            ),
+            "selected_candidate_image_direction": (
+                image_direction_from_x_offset(
+                    selected_candidate_endpoint_x_offset_px(self.selected_candidate.points_uv)
+                )
+                if self.selected_candidate is not None
+                else None
+            ),
+            "selected_endpoint_x_offset_px": (
+                selected_candidate_endpoint_x_offset_px(self.selected_candidate.points_uv)
+                if self.selected_candidate is not None
+                else None
             ),
             "selected_candidate_age_sec": selected_age,
             "candidate_switched": self.candidate_switched,
@@ -709,8 +726,9 @@ def primitive_curve_points(
     progress = np.linspace(0.0, 1.0, count)
     center_x = (width - 1) / 2.0
     normalized = float(np.clip(float(heading_deg) / max(1.0, maximum_visual_heading_deg), -1.0, 1.0))
-    # Positive rover heading/curvature is left, which is smaller image x.
-    lateral = -normalized * width * 0.42
+    # Mission1 uses compass/SDK-compatible heading offsets:
+    # positive heading is clockwise/right, which is larger image x.
+    lateral = normalized * width * 0.42
     xs = center_x + lateral * (progress**1.45)
     points = np.stack(
         (
@@ -723,6 +741,27 @@ def primitive_curve_points(
     _, unique_indices = np.unique(points[:, 1] * width + points[:, 0], return_index=True)
     points = points[np.sort(unique_indices)]
     return points
+
+
+def selected_candidate_endpoint_x_offset_px(points_uv: np.ndarray) -> int | None:
+    if points_uv.size == 0:
+        return None
+    width_center = (int(np.max(points_uv[:, 0])) + int(np.min(points_uv[:, 0]))) / 2.0
+    # The primitive starts at the camera center; use it as the local origin
+    # instead of the min/max of the curved points when available.
+    start_x = float(points_uv[0, 0])
+    return int(round(float(points_uv[-1, 0]) - start_x if math.isfinite(start_x) else width_center))
+
+
+def image_direction_from_x_offset(offset_px: int | float | None, *, deadband_px: float = 1.0) -> str | None:
+    if offset_px is None:
+        return None
+    value = float(offset_px)
+    if value > deadband_px:
+        return "RIGHT"
+    if value < -deadband_px:
+        return "LEFT"
+    return "CENTER"
 
 
 def corridor_mask(

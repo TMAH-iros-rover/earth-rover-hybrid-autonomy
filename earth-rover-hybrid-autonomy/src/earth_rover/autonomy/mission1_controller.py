@@ -294,6 +294,11 @@ class Mission1Autonomy:
                     command,
                     target_sequence=sequence,
                     heading_error_deg=heading_error,
+                    controller_debug=self._controller_debug(
+                        rotate,
+                        command,
+                        heading_error_deg=heading_error,
+                    ),
                 )
             if not self._try_send_control(command, now_mono):
                 return self._publish(
@@ -314,6 +319,11 @@ class Mission1Autonomy:
                 command,
                 target_sequence=sequence,
                 heading_error_deg=heading_error,
+                controller_debug=self._controller_debug(
+                    rotate,
+                    command,
+                    heading_error_deg=heading_error,
+                ),
             )
 
         invalid = self._validate_path(sam)
@@ -369,6 +379,12 @@ class Mission1Autonomy:
                 target_sequence=sequence,
                 local_heading_deg=heading_deg,
                 path_mean_score=path_score,
+                controller_debug=self._controller_debug(
+                    raw,
+                    command,
+                    local_heading_deg=heading_deg,
+                    heading_error_deg=_finite(navigation.get("heading_error_deg")),
+                ),
             )
         if not self._try_send_control(command, now_mono):
             return self._publish(
@@ -388,6 +404,12 @@ class Mission1Autonomy:
             target_sequence=sequence,
             local_heading_deg=heading_deg,
             path_mean_score=path_score,
+            controller_debug=self._controller_debug(
+                raw,
+                command,
+                local_heading_deg=heading_deg,
+                heading_error_deg=_finite(navigation.get("heading_error_deg")),
+            ),
         )
 
     def fail_safe(self, error: BaseException) -> dict[str, Any]:
@@ -555,6 +577,29 @@ class Mission1Autonomy:
             angular,
             mode="SAM_LOCAL_PATH_TRACKING",
         )
+
+    def _controller_debug(
+        self,
+        raw: ControlCommand,
+        filtered: ControlCommand,
+        *,
+        local_heading_deg: float | None = None,
+        heading_error_deg: float | None = None,
+    ) -> dict[str, Any]:
+        return {
+            "local_path_heading_deg": local_heading_deg,
+            "local_path_heading_convention": "positive_clockwise_right",
+            "navigation_heading_error_deg": heading_error_deg,
+            "navigation_heading_error_convention": "positive_clockwise_right",
+            "desired_angular": float(raw.angular),
+            "filtered_angular": float(filtered.angular),
+            "angular_convention": "positive_clockwise_right",
+            "sdk_angular_convention_source": (
+                "earth-rovers-sdk examples/README.md: angular -1 full left, +1 full right"
+            ),
+            "linear_raw": float(raw.linear),
+            "linear_filtered": float(filtered.linear),
+        }
 
     def _held_path_command(
         self,

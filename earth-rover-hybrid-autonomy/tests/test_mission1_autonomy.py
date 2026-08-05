@@ -134,6 +134,41 @@ def test_active_mission_tracks_valid_local_path():
     assert sdk.commands[-1].angular == pytest.approx(0.139626, rel=1e-4)
 
 
+def test_controller_positive_local_path_sends_positive_right_angular():
+    sdk = FakeSdk(active=True)
+    clock = Clock()
+    autonomy = controller(
+        sdk,
+        FakeSam(valid_sam(local_path_selected_heading_deg=20.0)),
+        clock,
+    )
+    clock.value += 0.2
+
+    status = autonomy.tick()
+
+    assert status["state"] == "DRIVING"
+    assert sdk.commands[-1].angular > 0.0
+    assert status["controller_debug"]["angular_convention"] == "positive_clockwise_right"
+    assert status["controller_debug"]["filtered_angular"] > 0.0
+
+
+def test_controller_negative_local_path_sends_negative_left_angular():
+    sdk = FakeSdk(active=True)
+    clock = Clock()
+    autonomy = controller(
+        sdk,
+        FakeSam(valid_sam(local_path_selected_heading_deg=-20.0)),
+        clock,
+    )
+    clock.value += 0.2
+
+    status = autonomy.tick()
+
+    assert status["state"] == "DRIVING"
+    assert sdk.commands[-1].angular < 0.0
+    assert status["controller_debug"]["filtered_angular"] < 0.0
+
+
 def test_control_send_failure_enters_cooldown_without_command_spam():
     sdk = FailingControlSdk(active=True)
     clock = Clock()
