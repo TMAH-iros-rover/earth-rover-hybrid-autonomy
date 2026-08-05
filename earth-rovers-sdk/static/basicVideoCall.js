@@ -10,6 +10,19 @@
  * @param  {string} codec - The {@link https://docs.agora.io/en/Voice/API%20Reference/web_ng/interfaces/clientconfig.html#codec| client codec} used by the browser.
  */
 var client;
+window.rtc_connection_state = "NOT_JOINED";
+window.rtc_event_history = [];
+
+function recordRtcEvent(type, details = {}) {
+  window.rtc_event_history.push({
+    timestamp: Date.now() / 1000,
+    type,
+    ...details,
+  });
+  if (window.rtc_event_history.length > 50) {
+    window.rtc_event_history.shift();
+  }
+}
 
 /*
  * Clear the video and audio tracks used by `client` on initiation.
@@ -240,14 +253,37 @@ $(".mic-list").delegate("a", "click", function (e) {
  */
 async function join() {
   // Add an event listener to play remote tracks when remote user publishes.
+  client.on("user-joined", (user) => {
+    recordRtcEvent("user-joined", { uid: String(user.uid) });
+  });
+  client.on("user-left", (user, reason) => {
+    recordRtcEvent("user-left", { uid: String(user.uid), reason: reason || null });
+    delete remoteUsers[user.uid];
+    $(`#player-wrapper-${user.uid}`).remove();
+  });
   client.on("user-published", handleUserPublished);
   client.on("user-unpublished", handleUserUnpublished);
+  client.on("connection-state-change", (currentState, previousState, reason) => {
+    window.rtc_connection_state = currentState;
+    recordRtcEvent("connection-state-change", {
+      currentState,
+      previousState,
+      reason: reason || null,
+    });
+  });
+  client.on("token-privilege-will-expire", () => {
+    recordRtcEvent("token-privilege-will-expire");
+  });
+  client.on("token-privilege-did-expire", () => {
+    recordRtcEvent("token-privilege-did-expire");
+  });
   options.uid = await client.join(
     options.appid,
     options.channel,
     options.token || null,
     options.uid || null
   );
+  window.rtc_connection_state = client.connectionState || "CONNECTED";
   $("#captured-frames").css("display", DEBUG_MODE ? "block" : "none");
 }
 
@@ -373,6 +409,7 @@ async function subscribe(user, mediaType) {
  */
 async function handleUserPublished(user, mediaType) {
   const id = user.uid;
+  recordRtcEvent("user-published", { uid: String(id), mediaType });
   remoteUsers[id] = user;
   try {
     await subscribe(user, mediaType);
@@ -387,6 +424,10 @@ async function handleUserPublished(user, mediaType) {
  * @param  {string} user - The {@link  https://docs.agora.io/en/Voice/API%20Reference/web_ng/interfaces/iagorartcremoteuser.html| remote user} to remove.
  */
 function handleUserUnpublished(user, mediaType) {
+  recordRtcEvent("user-unpublished", {
+    uid: String(user.uid),
+    mediaType,
+  });
   if (mediaType === "video") {
     const id = user.uid;
     delete remoteUsers[id];
@@ -404,8 +445,32 @@ function getCodec() {
   return value;
 }
 
-async function captureFrameAsBase64(videoTrack) {
+function captureVideoElementFrame(uid) {
+  const video = document.querySelector(`#player-${uid} video`);
+  if (!video || video.videoWidth < 64 || video.videoHeight < 64) {
+    return null;
+  }
+  const canvas = document.createElement("canvas");
+  canvas.width = video.videoWidth;
+  canvas.height = video.videoHeight;
+  const ctx = canvas.getContext("2d");
+  ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+  return canvas.toDataURL(
+    `image/${window.imageParams["imageFormat"]}`,
+    window.imageParams["imageQuality"]
+  );
+}
+
+async function captureFrameAsBase64(uid, videoTrack) {
+  const videoFrame = captureVideoElementFrame(uid);
+  if (videoFrame) {
+    return videoFrame;
+  }
+
   const frame = await videoTrack.getCurrentFrameData();
+  if (!frame || frame.width < 64 || frame.height < 64) {
+    return null;
+  }
   const canvas = document.createElement("canvas");
   canvas.width = frame.width;
   canvas.height = frame.height;
@@ -420,6 +485,7 @@ async function captureFrameAsBase64(videoTrack) {
 // Add at the beginning of the file
 const DEBUG_MODE = false;
 const lastBase64Frames = {};
+window.lastBase64Frames = lastBase64Frames;
 
 // Function to get the latest base64 frame for a specific UID
 async function getLastBase64Frame(uid) {
@@ -428,7 +494,10 @@ async function getLastBase64Frame(uid) {
     return null;
   }
 
-  const base64Frame = await captureFrameAsBase64(user.videoTrack);
+  const base64Frame = await captureFrameAsBase64(uid, user.videoTrack);
+  if (!base64Frame) {
+    return null;
+  }
   lastBase64Frames[uid] = base64Frame;
   return base64Frame;
 }

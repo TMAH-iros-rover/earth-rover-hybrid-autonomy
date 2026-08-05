@@ -425,25 +425,24 @@ async function refreshMission(logResult = true) {
   if (!status) {
     return;
   }
+  // /mission-route is the side-effect-free cached route and already
+  // includes latest_scanned_checkpoint -- it's populated once at
+  // /start-mission and is all this periodic poll needs. Polling
+  // /checkpoints-list here as well used to re-fetch from the cloud every
+  // 2s while a mission was active and overwrite the server's in-memory
+  // progress with whatever (or nothing) the cloud's checkpoints_list
+  // response carries, which made an already-reported checkpoint appear to
+  // reset back to 0 mid-mission and stall the route.
   try {
     const cachedRoute = await requestJson("/mission-route");
     if (cachedRoute.route_loaded) {
       renderCheckpoints(cachedRoute);
-    }
-  } catch (_error) {
-    // Older SDK servers may not expose the side-effect-free cached route.
-  }
-  if (!status.mission_configured || !status.mission_active) {
-    return;
-  }
-  try {
-    const checkpoints = await requestJson("/checkpoints-list");
-    renderCheckpoints(checkpoints);
-    if (logResult) {
-      appendLog("GET /checkpoints-list", checkpoints);
+      if (logResult) {
+        appendLog("GET /mission-route", cachedRoute);
+      }
     }
   } catch (error) {
-    appendLog("GET /checkpoints-list failed", error.payload || error.message, true);
+    appendLog("GET /mission-route failed", error.payload || error.message, true);
   }
 }
 

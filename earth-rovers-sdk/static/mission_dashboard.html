@@ -4,6 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Earth Rover Mission Dashboard</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
     <link rel="stylesheet" href="/static/mission_dashboard.css" />
   </head>
   <body>
@@ -23,9 +24,21 @@
           <span id="mission-detail">Waiting for SDK response</span>
         </div>
         <div class="actions">
+          <label class="mission-picker">
+            <span>Mission</span>
+            <input id="mission-slug" list="mission-options" value="mission-1" autocomplete="off" />
+            <datalist id="mission-options">
+              <option value="mission-1"></option>
+              <option value="mission1"></option>
+            </datalist>
+          </label>
+          <button id="connect-rover" class="primary" type="button">Connect Rover</button>
           <button id="start-mission" class="primary" type="button">Start Mission</button>
-          <button id="refresh-mission" type="button">Refresh Mission</button>
+          <button id="stop-autonomy" class="emergency-stop" type="button">EMERGENCY STOP</button>
+          <button id="resume-autonomy" type="button">Resume Auto</button>
+          <button id="refresh-mission" type="button">Get Mission</button>
           <button id="end-mission" class="danger" type="button">End Mission</button>
+          <button id="disconnect-rover" class="danger" type="button">Disconnect</button>
           <a class="button-link" href="/sdk" target="_blank" rel="noopener">Open RTC Stream</a>
         </div>
       </section>
@@ -37,11 +50,26 @@
               <h2>Front Camera</h2>
               <span id="camera-meta">Mission must be active</span>
             </div>
-            <div id="camera-state" class="status status-idle">Idle</div>
+            <div class="camera-tools">
+              <div class="view-switch" aria-label="Front camera view">
+                <button id="view-raw" class="small selected" type="button">Raw</button>
+                <button id="view-sam-tp" class="small" type="button">SAM-TP</button>
+              </div>
+              <div id="sam-tp-state" class="status status-idle">SAM-TP offline</div>
+              <div id="autonomy-state" class="status status-idle">Autonomy offline</div>
+              <div id="camera-state" class="status status-idle">Idle</div>
+            </div>
           </div>
           <div class="camera-stage">
             <img id="front-camera" alt="Earth Rover front camera" />
-            <div id="camera-placeholder">Start a mission to load the front camera.</div>
+            <div id="camera-placeholder">Connect the rover or start a mission to load the front camera.</div>
+          </div>
+          <div class="perception-legend">
+            <span><i class="score-swatch low"></i>Low traversability</span>
+            <span><i class="score-swatch high"></i>High traversability</span>
+            <span><i class="goal-swatch"></i>GPS global heading</span>
+            <span><i class="path-swatch"></i>SAM-TP heading-aware local path</span>
+            <span id="sam-tp-metrics">Start the SAM-TP shadow process to enable the overlay.</span>
           </div>
         </div>
 
@@ -72,6 +100,24 @@
               <li>No checkpoint data.</li>
             </ol>
           </section>
+
+          <section class="map-panel">
+            <div class="panel-header">
+              <div>
+                <h2>Mission Route</h2>
+                <span id="map-summary">Waiting for mission checkpoints</span>
+              </div>
+              <span id="map-position">No GPS</span>
+            </div>
+            <div id="mission-map" aria-label="Mission checkpoint route map"></div>
+            <div class="map-legend">
+              <span><i class="legend-dot rover"></i>Rover</span>
+              <span><i class="legend-dot checkpoint"></i>Checkpoint</span>
+              <span><i class="legend-line route"></i>Mission 1→2→3</span>
+              <span><i class="legend-line global"></i>GPS shortest path</span>
+              <span><i class="legend-line trail"></i>GPS trail (≥2 m)</span>
+            </div>
+          </section>
         </aside>
       </section>
 
@@ -84,6 +130,7 @@
       </section>
     </main>
 
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
     <script src="/static/mission_dashboard.js"></script>
   </body>
 </html>

@@ -18,38 +18,62 @@ class EarthRoverSDKClient:
     def __init__(self, base_url: str, timeout: float):
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
+        # /checkpoint-reached proxies to a cloud call the SDK server itself
+        # allows up to 15s to complete. Using the short control-loop timeout
+        # here causes spurious client-side timeouts while the server is still
+        # legitimately waiting on the cloud, which then triggers a duplicate
+        # report and a 422 from the cloud once the first one lands.
+        self.checkpoint_timeout = max(timeout, 5.0)
         self.session = requests.Session()
+        self._last_frames: dict[str, FrameData] = {}
 
-    def _request_json(self, method: str, path: str, **kwargs) -> dict[str, Any]:
+    def _request_json(
+        self, method: str, path: str, *, timeout: float | None = None, **kwargs
+    ) -> dict[str, Any]:
         url = f"{self.base_url}{path}"
         try:
-            response = self.session.request(method, url, timeout=self.timeout, **kwargs)
+            response = self.session.request(
+                method, url, timeout=timeout if timeout is not None else self.timeout, **kwargs
+            )
             response.raise_for_status()
             if not response.content:
                 return {}
             return response.json()
         except requests.RequestException as exc:
-            raise SDKClientError(f"{method} {path} failed: {exc}") from exc
+            detail = ""
+            response_obj = getattr(exc, "response", None)
+            if response_obj is not None and getattr(response_obj, "text", ""):
+                detail = f" body={response_obj.text[:500]}"
+            raise SDKClientError(f"{method} {path} failed: {exc}{detail}") from exc
         except ValueError as exc:
             raise SDKClientError(f"{method} {path} returned invalid JSON") from exc
 
     def _get_frame(self, source: str) -> FrameData:
         paths = [f"/v2/{source}", f"/{source}"]
+        errors: list[str] = []
         last_error: Exception | None = None
         for path in paths:
             try:
                 local_timestamp = time.time()
                 payload = self._request_json("GET", path)
                 encoded = self._extract_image_payload(payload)
-                return FrameData(
+                frame = FrameData(
                     timestamp=local_timestamp,
                     image=decode_base64_image(encoded),
                     source=source,
                     sdk_timestamp=safe_float(payload.get("timestamp")),
                 )
+                self._last_frames[source] = frame
+                return frame
             except Exception as exc:
                 last_error = exc
-        raise SDKClientError(f"Could not fetch {source} frame: {last_error}") from last_error
+                errors.append(f"{path}: {exc}")
+        cached = self._last_frames.get(source)
+        if cached is not None:
+            return cached
+        raise SDKClientError(
+            f"Could not fetch {source} frame after trying {', '.join(errors)}"
+        ) from last_error
 
     @staticmethod
     def _extract_image_payload(payload: dict[str, Any]) -> str:
@@ -158,8 +182,35 @@ class EarthRoverSDKClient:
             "raw": payload,
         }
 
+    def get_mission_route(self) -> dict[str, Any]:
+        """Read the SDK server's cached route without starting a mission."""
+
+        payload = self._request_json("GET", "/mission-route")
+        checkpoints = payload.get("checkpoints_list", [])
+        return {
+            "checkpoints": checkpoints if isinstance(checkpoints, list) else [],
+            "latest_scanned_checkpoint": safe_float(
+                payload.get("latest_scanned_checkpoint"), 0
+            ),
+            "mission_active": bool(payload.get("mission_active")),
+            "route_loaded": bool(payload.get("route_loaded")),
+            "raw": payload,
+        }
+
+    def get_mission_status(self) -> dict[str, Any]:
+        """Return the SDK bridge's local mission state without side effects."""
+
+        return self._request_json("GET", "/mission-status")
+
+    def report_checkpoint_details(self) -> dict[str, Any]:
+        """Report the rover's current GPS position as the reached checkpoint."""
+
+        return self._request_json(
+            "POST", "/checkpoint-reached", json={}, timeout=self.checkpoint_timeout
+        )
+
     def report_checkpoint(self) -> bool:
-        self._request_json("POST", "/checkpoint-reached", json={})
+        self.report_checkpoint_details()
         return True
 
     def start_mission(self) -> bool:

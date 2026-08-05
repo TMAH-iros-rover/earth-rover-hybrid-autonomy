@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import math
+import time
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 from earth_rover.navigation.gps_utils import bearing_deg, normalize_angle_deg
 from earth_rover.navigation.waypoint_manager import WaypointManager
@@ -50,6 +51,8 @@ class CheckpointRoutePlanner:
         heading_filter_alpha: float = 1.0,
         target_heading_deadband_deg: float = 0.0,
         large_heading_change_deg: float = 180.0,
+        max_heading_rate_deg_per_sec: float | None = None,
+        monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         radius = _finite(switch_radius_m)
         if radius is None or radius <= 0.0:
@@ -60,6 +63,10 @@ class CheckpointRoutePlanner:
             raise ValueError("target_heading_deadband_deg must be finite and non-negative")
         if not math.isfinite(large_heading_change_deg) or large_heading_change_deg <= 0.0:
             raise ValueError("large_heading_change_deg must be finite and positive")
+        if max_heading_rate_deg_per_sec is not None and (
+            not math.isfinite(max_heading_rate_deg_per_sec) or max_heading_rate_deg_per_sec <= 0.0
+        ):
+            raise ValueError("max_heading_rate_deg_per_sec must be finite and positive")
         self._waypoints = WaypointManager(
             checkpoints,
             radius,
@@ -68,8 +75,16 @@ class CheckpointRoutePlanner:
         self._heading_filter_alpha = float(heading_filter_alpha)
         self._target_heading_deadband_deg = float(target_heading_deadband_deg)
         self._large_heading_change_deg = float(large_heading_change_deg)
+        self._max_heading_rate_deg_per_sec = (
+            None
+            if max_heading_rate_deg_per_sec is None
+            else float(max_heading_rate_deg_per_sec)
+        )
+        self._monotonic = monotonic
         self._filtered_heading_error_deg: float | None = None
         self._filtered_target_sequence: int | None = None
+        self._last_accepted_heading_deg: float | None = None
+        self._last_accepted_heading_monotonic: float | None = None
 
     def update(
         self,
@@ -79,7 +94,7 @@ class CheckpointRoutePlanner:
     ) -> GlobalRouteState:
         lat = _latitude(latitude)
         lon = _longitude(longitude)
-        heading = _heading(heading_deg)
+        heading = self._sanitize_heading(_heading(heading_deg))
         target = self._waypoints.current_target()
 
         if target is None:
@@ -172,6 +187,47 @@ class CheckpointRoutePlanner:
         self._waypoints.mark_current_reported()
         self._filtered_heading_error_deg = None
         self._filtered_target_sequence = None
+
+    def _sanitize_heading(self, heading: float | None) -> float | None:
+        """Reject a heading reading that implies an impossible turn rate.
+
+        A live run showed current_heading_deg jump between unrelated values
+        (e.g. 297 -> 213 -> 40 -> 299 within about a second of telemetry) --
+        physically impossible for this platform, but each jump was still
+        >= large_heading_change_deg, so _filter_heading_error's smoothing
+        (which intentionally snaps straight through on a large change, to
+        track a real sharp turn quickly) let the noise straight into
+        heading_error_rad. That drove the local planner's immediate_reset
+        path and mission1's ROTATE_TO_GOAL to chase a bogus heading, which
+        showed up as the rover spinning in place. Hold the last accepted
+        heading instead of accepting a reading whose implied turn rate
+        exceeds what the rover can actually do.
+        """
+
+        if heading is None or self._max_heading_rate_deg_per_sec is None:
+            if heading is not None:
+                self._last_accepted_heading_deg = heading
+                self._last_accepted_heading_monotonic = self._monotonic()
+            return heading
+        now = self._monotonic()
+        if (
+            self._last_accepted_heading_deg is None
+            or self._last_accepted_heading_monotonic is None
+        ):
+            self._last_accepted_heading_deg = heading
+            self._last_accepted_heading_monotonic = now
+            return heading
+        dt = max(1e-3, now - self._last_accepted_heading_monotonic)
+        implied_rate = abs(normalize_angle_deg(heading - self._last_accepted_heading_deg)) / dt
+        if implied_rate > self._max_heading_rate_deg_per_sec:
+            # Don't advance the reference timestamp: if this keeps being
+            # reported, growing dt against the same stale reference will
+            # eventually let a real (just fast) change through instead of
+            # rejecting it forever.
+            return self._last_accepted_heading_deg
+        self._last_accepted_heading_deg = heading
+        self._last_accepted_heading_monotonic = now
+        return heading
 
     def _remaining_checkpoint_coordinates(self) -> tuple[tuple[float, float], ...]:
         coordinates: list[tuple[float, float]] = []

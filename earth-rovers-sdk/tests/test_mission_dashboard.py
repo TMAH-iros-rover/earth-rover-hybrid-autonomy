@@ -141,7 +141,11 @@ def test_dashboard_javascript_has_no_control_endpoint() -> None:
     assert '"/connect-rover"' in source
     assert '"/disconnect-rover"' in source
     assert '"/mission-status"' in source
-    assert '"/checkpoints-list"' in source
+    # Polling /checkpoints-list while a mission was active re-fetched from
+    # the cloud every cycle and overwrote the server's locally-tracked
+    # latest_scanned_checkpoint, making progress appear to reset mid-mission.
+    # /mission-route (side-effect free, already polled below) covers this.
+    assert '"/checkpoints-list"' not in source
     assert '"/end-mission"' in source
     assert '"/control"' not in source
     assert "send_control" not in source
@@ -528,6 +532,72 @@ def test_start_mission_uses_local_mission_after_status_retry_failure(
     assert main.checkpoints_list_data["checkpoints_list"][0]["sequence"] == 1
     assert payload["local_mission"] is True
     assert payload["cloud_mission"] is False
+
+
+def test_refreshing_checkpoints_list_does_not_regress_reported_progress(
+    monkeypatch,
+) -> None:
+    # Regression: the dashboard used to poll GET /checkpoints-list every 2s
+    # while a mission was active. That endpoint refetches from the cloud and
+    # used to overwrite checkpoints_list_data wholesale, and the cloud's
+    # checkpoints_list response doesn't carry latest_scanned_checkpoint (it's
+    # only tracked locally by advance_cached_checkpoint()) -- so a rover that
+    # had already reported checkpoint 1 would appear to reset back to 0.
+    class Response:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {"checkpoints_list": [{"sequence": 1}, {"sequence": 2}]}
+
+    monkeypatch.setenv("SDK_API_TOKEN", "token")
+    monkeypatch.setenv("BOT_SLUG", "bot")
+    monkeypatch.setattr(main, "selected_mission_slug", "mission-1")
+    monkeypatch.setattr(
+        main,
+        "checkpoints_list_data",
+        {
+            "checkpoints_list": [{"sequence": 1}, {"sequence": 2}],
+            "latest_scanned_checkpoint": 1,
+        },
+    )
+    monkeypatch.setattr(main.requests, "post", lambda *_args, **_kwargs: Response())
+
+    result = asyncio.run(main.get_checkpoints_list())
+
+    assert result["latest_scanned_checkpoint"] == 1
+    assert main.checkpoints_list_data["latest_scanned_checkpoint"] == 1
+
+
+def test_refreshing_checkpoints_list_keeps_a_higher_cloud_reported_progress(
+    monkeypatch,
+) -> None:
+    class Response:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {
+                "checkpoints_list": [{"sequence": 1}, {"sequence": 2}],
+                "latest_scanned_checkpoint": 2,
+            }
+
+    monkeypatch.setenv("SDK_API_TOKEN", "token")
+    monkeypatch.setenv("BOT_SLUG", "bot")
+    monkeypatch.setattr(main, "selected_mission_slug", "mission-1")
+    monkeypatch.setattr(
+        main,
+        "checkpoints_list_data",
+        {
+            "checkpoints_list": [{"sequence": 1}, {"sequence": 2}],
+            "latest_scanned_checkpoint": 1,
+        },
+    )
+    monkeypatch.setattr(main.requests, "post", lambda *_args, **_kwargs: Response())
+
+    result = asyncio.run(main.get_checkpoints_list())
+
+    assert result["latest_scanned_checkpoint"] == 2
 
 
 def test_local_mission_checkpoint_reached_advances_cached_route(

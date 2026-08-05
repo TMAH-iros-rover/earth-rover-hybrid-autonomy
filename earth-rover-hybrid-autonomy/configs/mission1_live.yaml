@@ -2,14 +2,14 @@ mission1_autonomy:
   loop_hz: 5.0
   sam_status_url: "http://127.0.0.1:8001/status"
   sam_timeout_sec: 0.5
-  maximum_sam_age_sec: 1.5
+  maximum_sam_age_sec: 2.5
 
   # Low-speed live limits with enough command authority to clear the rover's
   # observed drive/steering deadzone. These remain well below teleop caps and
   # still require an attended test because LOCAL PATH is image-space.
-  base_linear: 0.12
-  minimum_linear: 0.08
-  max_linear: 0.15
+  base_linear: 0.20
+  minimum_linear: 0.12
+  max_linear: 0.3
   heading_kp: 0.55
   max_angular: 0.30
   stop_forward_heading_deg: 50.0
@@ -28,33 +28,69 @@ mission1_autonomy:
   confidence_slowdown_gain: 0.70
   curvature_slowdown_gain: 0.65
   angular_deadband: 0.03
+  # When every local-path candidate is blocked (near-field unsafe), rotate
+  # in place toward whichever side looked least blocked instead of just
+  # stopping in front of the obstacle -- the local planner only evaluates
+  # curves drawn on the current camera frame, so it needs the rover to
+  # physically turn before a clear direction exists to score at all. Give up
+  # and SAFETY_STOP after this many seconds if nothing opens up.
+  search_rotate_angular: 0.22
+  search_rotate_timeout_sec: 10.0
 
 control:
   linear_min: 0.0
-  linear_max: 0.15
+  linear_max: 0.3
   angular_min: -0.30
   angular_max: 0.30
   command_smoothing_alpha: 0.25
-  max_linear_delta_per_sec: 0.18
+  max_linear_delta_per_sec: 0.3
   max_angular_delta_per_sec: 0.50
   reverse_angular_sign_slowdown: true
   angular_deadband: 0.03
 
 planner:
   mode: motion_primitives
-  candidate_headings_deg: [-45, -30, -15, 0, 15, 30, 45]
+  # Finer steps near center let the planner express a small correction
+  # (e.g. +5-10 deg) instead of jumping straight to +/-15, which was causing
+  # it to commit to a much sharper turn than the situation needed.
+  candidate_headings_deg: [-45, -30, -20, -10, -5, 0, 5, 10, 20, 30, 45]
   traversability_weight: 1.0
   goal_heading_weight: 0.7
   continuity_weight: 0.45
   curvature_weight: 0.10
   near_field_risk_weight: 1.5
   path_score_threshold: 0.45
-  near_field_stop_threshold: 0.25
+  # near_risk = max(0, near_field_stop_threshold - near_low) in
+  # motion_primitive_planner.py:_score_candidates -- this is exactly 0 (no
+  # effect on candidate selection at all, despite near_field_risk_weight
+  # being the largest weight in the formula) for any candidate whose
+  # near-field score is above this threshold, then hard-rejects the
+  # candidate once it drops below it. A live run's near_field_score stayed
+  # in the 0.83-0.96 range the whole time with 0.25 as the threshold, so
+  # this term never engaged; the planner steers purely on goal/traversability
+  # until a wall is close enough to crash the score under 0.25, producing a
+  # late, sharp correction instead of a gradual one. Raised so the safety
+  # term starts contributing while there's still real distance to work with.
+  near_field_stop_threshold: 0.6
   near_field_percentile: 10
   full_path_percentile: 15
   candidate_score_ema_alpha: 0.35
-  min_candidate_commit_sec: 0.8
+  # A committed candidate cannot be switched away from for this long
+  # (motion_primitive_planner.py:_select_candidate), regardless of how the
+  # scene changes in the meantime. At 0.8s + switch_confirm_count ticks to
+  # reconsider, the rover was driving straight along a locked-in heading for
+  # ~1s+ before it could correct back toward the goal, overshooting into
+  # walls. Shortened so it still damps single-frame noise but re-evaluates
+  # fast enough to track a moving heading target.
+  min_candidate_commit_sec: 0.35
   transient_invalid_grace_sec: 0.8
   max_plan_age_sec: 1.5
-  switch_score_margin: 0.08
+  switch_score_margin: 0.05
+  # switch_confirm_count=1 meant a single noisy tick where the opposite
+  # extreme candidate (e.g. +45 deg) narrowly out-scored the current one was
+  # enough to commit a full switch immediately -- no corroboration required.
+  # A live run showed the selected heading jump straight from -45 to +45
+  # deg in back-to-back frames this way, which reads as the rover spinning
+  # in place. Back to requiring 2 consecutive ticks of agreement before
+  # switching; min_candidate_commit_sec above still keeps reaction fast.
   switch_confirm_count: 2

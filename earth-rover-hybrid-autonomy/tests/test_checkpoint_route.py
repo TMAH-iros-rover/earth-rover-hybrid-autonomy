@@ -111,6 +111,63 @@ def test_route_finishes_only_after_last_checkpoint_is_reported() -> None:
     assert complete.target_checkpoint is None
 
 
+def test_rejects_a_heading_jump_that_implies_an_impossible_turn_rate() -> None:
+    # Regression: a live run's current_heading_deg jumped between unrelated
+    # values (e.g. 297 -> 213 deg within ~0.5s of telemetry, an implied
+    # ~170 deg/s that this rover cannot do) and drove the planner/controller
+    # to spin chasing the noise. large_heading_change_deg intentionally lets
+    # big jumps through unfiltered so a real sharp turn is tracked fast, so
+    # the guard has to be a separate, rate-based rejection.
+    checkpoints = [{"sequence": 1, "latitude": 1.0, "longitude": 0.0}]
+    clock = [0.0]
+    planner = CheckpointRoutePlanner(
+        checkpoints,
+        switch_radius_m=1.0,
+        max_heading_rate_deg_per_sec=120.0,
+        monotonic=lambda: clock[0],
+    )
+
+    first = planner.update(0.0, 0.0, heading_deg=0.0)
+    clock[0] += 0.1
+    noisy = planner.update(0.0, 0.0, heading_deg=90.0)  # implied 900 deg/s
+
+    assert first.current_heading_deg == 0.0
+    assert noisy.current_heading_deg == 0.0
+
+
+def test_accepts_a_sustained_heading_change_even_if_it_starts_fast() -> None:
+    checkpoints = [{"sequence": 1, "latitude": 1.0, "longitude": 0.0}]
+    clock = [0.0]
+    planner = CheckpointRoutePlanner(
+        checkpoints,
+        switch_radius_m=1.0,
+        max_heading_rate_deg_per_sec=120.0,
+        monotonic=lambda: clock[0],
+    )
+
+    planner.update(0.0, 0.0, heading_deg=0.0)
+    clock[0] += 0.1
+    rejected = planner.update(0.0, 0.0, heading_deg=90.0)
+    # The same new reading keeps coming back; growing dt against the still
+    # -unmoved reference eventually makes the implied rate plausible again
+    # instead of rejecting a real change forever.
+    clock[0] += 1.0
+    accepted = planner.update(0.0, 0.0, heading_deg=90.0)
+
+    assert rejected.current_heading_deg == 0.0
+    assert accepted.current_heading_deg == 90.0
+
+
+def test_heading_rate_guard_is_disabled_by_default() -> None:
+    checkpoints = [{"sequence": 1, "latitude": 1.0, "longitude": 0.0}]
+    planner = CheckpointRoutePlanner(checkpoints, switch_radius_m=1.0)
+
+    planner.update(0.0, 0.0, heading_deg=0.0)
+    noisy = planner.update(0.0, 0.0, heading_deg=90.0)
+
+    assert noisy.current_heading_deg == 90.0
+
+
 @pytest.mark.parametrize("radius", [0.0, -1.0, float("nan")])
 def test_switch_radius_must_be_positive(radius: float) -> None:
     with pytest.raises(ValueError, match="switch_radius_m"):

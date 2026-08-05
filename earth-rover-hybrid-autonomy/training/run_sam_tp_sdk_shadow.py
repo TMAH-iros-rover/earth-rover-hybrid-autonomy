@@ -231,6 +231,12 @@ def main(argv: list[str] | None = None) -> int:
                                     large_heading_change_deg=float(
                                         navigation_cfg.get("large_heading_change_deg", 180.0)
                                     ),
+                                    max_heading_rate_deg_per_sec=(
+                                        float(navigation_cfg["max_heading_rate_deg_per_sec"])
+                                        if navigation_cfg.get("max_heading_rate_deg_per_sec")
+                                        is not None
+                                        else None
+                                    ),
                                 )
                                 route_signature = signature
                             elif not route["route_loaded"]:

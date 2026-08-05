@@ -23,3 +23,16 @@ def test_traversability_replay_profile_is_log_only_and_configurable():
     assert config["recovery"]["enabled"] is False
     assert config["traversability_adapter"]["sector_boundaries"] == [0.0, 0.34, 0.66, 1.0]
     assert config["goal_aware_planner"]["candidate_heading_offsets_deg"]["LEFT"] == 35
+
+
+def test_mission1_live_profile_has_bounded_deadzone_compensation():
+    config = load_config(
+        ROOT / "configs/default.yaml", ROOT / "configs/mission1_live.yaml"
+    )
+
+    mission = config["mission1_autonomy"]
+    control = config["control"]
+    assert 0.0 < mission["minimum_linear"] <= mission["base_linear"]
+    assert mission["base_linear"] <= mission["max_linear"] <= 0.15
+    assert control["linear_max"] == mission["max_linear"]
+    assert control["angular_max"] == mission["max_angular"] <= 0.30

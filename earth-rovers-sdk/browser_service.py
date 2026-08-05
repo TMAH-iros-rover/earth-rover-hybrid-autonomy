@@ -20,6 +20,24 @@ STARTUP_TIMEOUT_SEC = float(os.getenv("BROWSER_STARTUP_TIMEOUT_SEC", "20"))
 TELEMETRY_TIMEOUT_SEC = float(os.getenv("TELEMETRY_READY_TIMEOUT_SEC", "15"))
 CAMERA_TIMEOUT_SEC = float(os.getenv("CAMERA_READY_TIMEOUT_SEC", "20"))
 FRAME_REQUEST_TIMEOUT_SEC = float(os.getenv("FRAME_REQUEST_TIMEOUT_SEC", "1.0"))
+# initialize_browser() only checks that self.browser/self.page objects exist,
+# not that the RTC video call inside the page is still alive. If the rover's
+# WebRTC stream stalls or drops, front()/rear() fail forever with no way to
+# recover short of restarting this process. After this many consecutive
+# camera failures, tear down and relaunch the browser so the next request
+# re-runs the full launch-and-join sequence instead of staying stuck.
+#
+# Restarting closes the *entire* browser, including a currently-healthy RTM
+# control channel -- so this must not fire on ordinary short hiccups (e.g.
+# the brief gap between RTC join completing and the first video frame
+# actually arriving). Both a failure count AND a minimum elapsed time are
+# required before restarting, so a fast-failing burst (e.g. right after the
+# page itself dies, evaluate() raises almost instantly) can't rack up the
+# count in under a second and trigger a restart loop.
+CAMERA_FAILURE_RESTART_THRESHOLD = int(os.getenv("CAMERA_FAILURE_RESTART_THRESHOLD", "12"))
+CAMERA_FAILURE_RESTART_MIN_WINDOW_SEC = float(
+    os.getenv("CAMERA_FAILURE_RESTART_MIN_WINDOW_SEC", "12.0")
+)
 
 if FORMAT not in ["png", "jpeg", "webp"]:
     raise ValueError("Invalid image format. Supported formats: png, jpeg, webp")
@@ -34,6 +52,10 @@ for name, value in (
 ):
     if not math.isfinite(value) or value <= 0:
         raise ValueError(f"{name} must be finite and positive")
+if CAMERA_FAILURE_RESTART_THRESHOLD <= 0:
+    raise ValueError("CAMERA_FAILURE_RESTART_THRESHOLD must be a positive integer")
+if not math.isfinite(CAMERA_FAILURE_RESTART_MIN_WINDOW_SEC) or CAMERA_FAILURE_RESTART_MIN_WINDOW_SEC < 0:
+    raise ValueError("CAMERA_FAILURE_RESTART_MIN_WINDOW_SEC must be finite and non-negative")
 
 
 class BrowserServiceError(RuntimeError):
@@ -84,6 +106,8 @@ class BrowserService:
         self.default_viewport = {"width": 3840, "height": 2160}
         self.initialization_stage = "NOT_STARTED"
         self.last_error = None
+        self._consecutive_camera_failures = 0
+        self._camera_failure_streak_started_monotonic = None
 
     def status(self) -> dict:
         return {
@@ -399,36 +423,77 @@ class BrowserService:
 
     async def front(self, timeout_sec: float | None = None) -> str:
         await self.initialize_browser()
-        front_frame = await self._wait_for_frame(
-            1000,
-            timeout_sec=CAMERA_TIMEOUT_SEC if timeout_sec is None else timeout_sec,
-        )
+        try:
+            front_frame = await self._wait_for_frame(
+                1000,
+                timeout_sec=CAMERA_TIMEOUT_SEC if timeout_sec is None else timeout_sec,
+            )
+        except BrowserServiceError:
+            await self._register_camera_failure()
+            raise
         if not front_frame:
             self.initialization_stage = "READY_NO_FRONT_CAMERA"
             self.last_error = "Front camera timeout"
+            await self._register_camera_failure()
             raise BrowserServiceError(
                 "Front camera did not publish a frame before the timeout. "
                 "Confirm that the bot is online and its RTC video is connected."
             )
+        self._consecutive_camera_failures = 0
+        self._camera_failure_streak_started_monotonic = None
         self.initialization_stage = "READY"
         self.last_error = None
         return front_frame
 
     async def rear(self, timeout_sec: float | None = None) -> str:
         await self.initialize_browser()
-        rear_frame = await self._wait_for_frame(
-            1001,
-            timeout_sec=CAMERA_TIMEOUT_SEC if timeout_sec is None else timeout_sec,
-        )
+        try:
+            rear_frame = await self._wait_for_frame(
+                1001,
+                timeout_sec=CAMERA_TIMEOUT_SEC if timeout_sec is None else timeout_sec,
+            )
+        except BrowserServiceError:
+            await self._register_camera_failure()
+            raise
         if not rear_frame:
             self.initialization_stage = "READY_NO_REAR_CAMERA"
             self.last_error = "Rear camera timeout"
+            await self._register_camera_failure()
             raise BrowserServiceError(
                 "Rear camera did not publish a frame before the timeout."
             )
+        self._consecutive_camera_failures = 0
+        self._camera_failure_streak_started_monotonic = None
         self.initialization_stage = "READY"
         self.last_error = None
         return rear_frame
+
+    async def _register_camera_failure(self) -> None:
+        """Track repeated front()/rear() failures and restart a dead browser.
+
+        initialize_browser() only checks that self.browser/self.page are set,
+        not that the RTC session inside the page is still producing video, so
+        a dropped WebRTC connection previously meant every future frame
+        request failed forever. Restarting tears down the whole browser --
+        including a currently-healthy RTM control channel -- so this must not
+        fire on an ordinary short hiccup. Require both a failure count AND a
+        minimum elapsed time since the streak began before actually
+        restarting.
+        """
+
+        now = time.monotonic()
+        if self._camera_failure_streak_started_monotonic is None:
+            self._camera_failure_streak_started_monotonic = now
+        self._consecutive_camera_failures += 1
+        streak_elapsed = now - self._camera_failure_streak_started_monotonic
+        if (
+            self._consecutive_camera_failures < CAMERA_FAILURE_RESTART_THRESHOLD
+            or streak_elapsed < CAMERA_FAILURE_RESTART_MIN_WINDOW_SEC
+        ):
+            return
+        self._consecutive_camera_failures = 0
+        self._camera_failure_streak_started_monotonic = None
+        await self.close_browser()
 
     async def _wait_for_frame(
         self,

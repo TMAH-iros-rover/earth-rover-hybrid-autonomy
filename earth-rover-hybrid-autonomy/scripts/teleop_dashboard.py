@@ -21,11 +21,17 @@ from earth_rover.utils.config import load_config
 from earth_rover.utils.image import decode_base64_image
 from earth_rover.utils.math_utils import safe_float
 
+MAX_TELEOP_LINEAR = 0.25
+MAX_TELEOP_ANGULAR = 0.40
+UP_KEYS = {65362, 2490368, 0x01000013}
+DOWN_KEYS = {65364, 2621440, 0x01000015}
+LEFT_KEYS = {65361, 2424832, 0x01000012}
+RIGHT_KEYS = {65363, 2555904, 0x01000014}
+
 
 class SharedState:
-    def __init__(self, trail_limit: int):
+    def __init__(self, trail_limit: int, deadman_timeout: float = 0.65):
         self.lock = threading.Lock()
-        self.api_lock = threading.Lock()
         self.running = True
         self.frame = None
         self.frame_timestamp = None
@@ -36,11 +42,27 @@ class SharedState:
         self.linear = 0.0
         self.angular = 0.0
         self.lamp = 0
-        self.drive_speed = 0.2
+        self.drive_speed = 0.20
         self.turn_speed = 0.35
-        self.angular_hold_timeout = 0.35
+        self.deadman_timeout = deadman_timeout
+        self.armed = False
+        self.last_linear_key_time = 0.0
         self.last_angular_key_time = 0.0
+        self.stop_burst_remaining = 0
         self.control_error = ""
+        self.last_key = "none"
+        self.last_key_code = -1
+        self.key_event_count = 0
+        self.control_send_count = 0
+        self.last_sent_command = (0.0, 0.0, 0)
+
+    def request_stop(self, repeats: int = 3) -> None:
+        self.armed = False
+        self.linear = 0.0
+        self.angular = 0.0
+        self.last_linear_key_time = 0.0
+        self.last_angular_key_time = 0.0
+        self.stop_burst_remaining = max(self.stop_burst_remaining, repeats)
 
 
 def fetch_v2_frame(sdk: EarthRoverSDKClient, source: str) -> tuple[np.ndarray, float | None]:
@@ -61,8 +83,7 @@ def camera_worker(state: SharedState, base_url: str, timeout: float, source: str
                 return
         started = time.monotonic()
         try:
-            with state.api_lock:
-                frame, timestamp = fetch_v2_frame(sdk, source)
+            frame, timestamp = fetch_v2_frame(sdk, source)
             with state.lock:
                 state.frame = frame
                 state.frame_timestamp = timestamp
@@ -85,8 +106,7 @@ def telemetry_worker(state: SharedState, base_url: str, timeout: float, hz: floa
             if not state.running:
                 return
         try:
-            with state.api_lock:
-                data = sdk.get_data()
+            data = sdk.get_data()
             with state.lock:
                 state.data = data
                 state.data_error = ""
@@ -107,20 +127,45 @@ def control_worker(state: SharedState, base_url: str, timeout: float, hz: float)
         with state.lock:
             if not state.running:
                 return
-            if time.monotonic() - state.last_angular_key_time > state.angular_hold_timeout:
-                state.angular = 0.0
-            linear = state.linear
-            angular = state.angular
-            lamp = state.lamp
+            should_send, linear, angular, lamp = control_snapshot(
+                state, time.monotonic()
+            )
+        if not should_send:
+            time.sleep(delay)
+            continue
         try:
-            with state.api_lock:
-                sdk.send_control(ControlCommand(linear, angular, lamp=lamp, mode="TELEOP"))
+            sdk.send_control(ControlCommand(linear, angular, lamp=lamp, mode="TELEOP"))
             with state.lock:
                 state.control_error = ""
+                state.control_send_count += 1
+                state.last_sent_command = (linear, angular, lamp)
         except Exception as exc:
             with state.lock:
                 state.control_error = str(exc)
+                state.request_stop()
         time.sleep(delay)
+
+
+def control_snapshot(
+    state: SharedState,
+    now: float,
+) -> tuple[bool, float, float, int]:
+    """Apply dead-man expiry and return one command-loop snapshot.
+
+    The caller must hold ``state.lock``. Keeping this logic independent from
+    networking makes the fail-safe behavior deterministic and testable.
+    """
+
+    if now - state.last_linear_key_time > state.deadman_timeout:
+        state.linear = 0.0
+    if now - state.last_angular_key_time > state.deadman_timeout:
+        state.angular = 0.0
+    should_send = state.armed or state.stop_burst_remaining > 0
+    linear = state.linear if state.armed else 0.0
+    angular = state.angular if state.armed else 0.0
+    if not state.armed and state.stop_burst_remaining > 0:
+        state.stop_burst_remaining -= 1
+    return should_send, linear, angular, state.lamp
 
 
 def latlon_to_xy_m(lat: float, lon: float, origin_lat: float, origin_lon: float) -> tuple[float, float]:
@@ -199,9 +244,16 @@ def build_dashboard(state: SharedState, window_size: tuple[int, int], source: st
         linear = state.linear
         angular = state.angular
         lamp = state.lamp
+        armed = state.armed
+        deadman_timeout = state.deadman_timeout
         drive_speed = state.drive_speed
         turn_speed = state.turn_speed
         control_error = state.control_error
+        last_key = state.last_key
+        last_key_code = state.last_key_code
+        key_event_count = state.key_event_count
+        control_send_count = state.control_send_count
+        last_sent_command = state.last_sent_command
 
     if frame is None:
         cv2.rectangle(canvas, (0, 0), (cam_w, height), (20, 20, 20), -1)
@@ -221,8 +273,8 @@ def build_dashboard(state: SharedState, window_size: tuple[int, int], source: st
     panel = canvas[:, cam_w:]
     cv2.rectangle(panel, (0, 0), (panel_w, height), (28, 30, 34), -1)
     draw_text(panel, "Teleop Dashboard", 14, 30, 0.75)
-    draw_text(panel, "W/S linear +/-  hold A/D turn", 14, 62, 0.5)
-    draw_text(panel, "Space stop  L lamp  +/- step", 14, 84, 0.5)
+    draw_text(panel, "E arm | hold W/S/A/D to drive", 14, 62, 0.5)
+    draw_text(panel, "Space disarm/stop | L lamp | +/- speed", 14, 84, 0.46)
     draw_text(panel, "Q or Esc quit", 14, 106, 0.5)
 
     y = 142
@@ -241,40 +293,101 @@ def build_dashboard(state: SharedState, window_size: tuple[int, int], source: st
 
     draw_minimap(panel, trail, data.orientation if data else None)
 
-    y2 = 580
+    y2 = 552
     draw_text(panel, f"cmd linear: {linear:+.2f}", 14, y2)
     draw_text(panel, f"cmd angular: {angular:+.2f}", 14, y2 + 24)
     draw_text(panel, f"step linear: {drive_speed:.2f}  angular: {turn_speed:.2f}", 14, y2 + 48)
     draw_text(panel, f"lamp: {'on' if lamp else 'off'}", 14, y2 + 72)
+    draw_text(
+        panel,
+        f"control: {'ARMED' if armed else 'DISARMED'} | deadman {deadman_timeout:.2f}s",
+        14,
+        y2 + 96,
+        0.48,
+    )
+    draw_text(
+        panel,
+        f"key: {last_key} ({last_key_code}) events: {key_event_count}",
+        14,
+        y2 + 120,
+        0.42,
+    )
+    draw_text(
+        panel,
+        "sent: "
+        f"{control_send_count} "
+        f"({last_sent_command[0]:+.2f},{last_sent_command[1]:+.2f},L{last_sent_command[2]})",
+        14,
+        y2 + 140,
+        0.42,
+    )
     if control_error:
-        draw_text(panel, f"control error: {control_error[:42]}", 14, y2 + 102, 0.42)
+        draw_text(panel, f"control error: {control_error[:42]}", 14, y2 + 160, 0.42)
 
     return canvas
 
 
 def handle_key(state: SharedState, key: int) -> bool:
-    if key in (27, ord("q")):
+    key_names = {
+        ord("e"): "E/arm",
+        ord("E"): "E/arm",
+        ord("w"): "W/forward",
+        ord("W"): "W/forward",
+        ord("s"): "S/reverse",
+        ord("S"): "S/reverse",
+        ord("a"): "A/left",
+        ord("A"): "A/left",
+        ord("d"): "D/right",
+        ord("D"): "D/right",
+        ord(" "): "Space/stop",
+        ord("l"): "L/lamp",
+        ord("L"): "L/lamp",
+    }
+    if key in UP_KEYS:
+        key_names[key] = "Up/forward"
+    elif key in DOWN_KEYS:
+        key_names[key] = "Down/reverse"
+    elif key in LEFT_KEYS:
+        key_names[key] = "Left/turn"
+    elif key in RIGHT_KEYS:
+        key_names[key] = "Right/turn"
+
+    if key in (27, ord("q"), ord("Q")):
+        with state.lock:
+            state.last_key = "Quit"
+            state.last_key_code = key
+            state.key_event_count += 1
+            state.request_stop()
         return False
     with state.lock:
-        if key in (ord("w"), ord("W")):
-            state.linear = clamp_command(state.linear + state.drive_speed)
-        elif key in (ord("s"), ord("S")):
-            state.linear = clamp_command(state.linear - state.drive_speed)
-        elif key in (ord("a"), ord("A")):
-            state.angular = state.turn_speed
-            state.last_angular_key_time = time.monotonic()
-        elif key in (ord("d"), ord("D")):
-            state.angular = -state.turn_speed
-            state.last_angular_key_time = time.monotonic()
-        elif key == ord(" "):
+        now = time.monotonic()
+        state.last_key = key_names.get(key, "unknown")
+        state.last_key_code = key
+        state.key_event_count += 1
+        if key in (ord("e"), ord("E")):
+            state.armed = True
             state.linear = 0.0
             state.angular = 0.0
-            state.last_angular_key_time = 0.0
+            state.stop_burst_remaining = 0
+        elif key in (ord("w"), ord("W"), *UP_KEYS) and state.armed:
+            state.linear = state.drive_speed
+            state.last_linear_key_time = now
+        elif key in (ord("s"), ord("S"), *DOWN_KEYS) and state.armed:
+            state.linear = -state.drive_speed
+            state.last_linear_key_time = now
+        elif key in (ord("a"), ord("A"), *LEFT_KEYS) and state.armed:
+            state.angular = state.turn_speed
+            state.last_angular_key_time = now
+        elif key in (ord("d"), ord("D"), *RIGHT_KEYS) and state.armed:
+            state.angular = -state.turn_speed
+            state.last_angular_key_time = now
+        elif key == ord(" "):
+            state.request_stop()
         elif key in (ord("l"), ord("L")):
             state.lamp = 1 - state.lamp
         elif key in (ord("+"), ord("=")):
-            state.drive_speed = min(1.0, state.drive_speed + 0.05)
-            state.turn_speed = min(1.0, state.turn_speed + 0.05)
+            state.drive_speed = min(MAX_TELEOP_LINEAR, state.drive_speed + 0.05)
+            state.turn_speed = min(MAX_TELEOP_ANGULAR, state.turn_speed + 0.05)
         elif key in (ord("-"), ord("_")):
             state.drive_speed = max(0.05, state.drive_speed - 0.05)
             state.turn_speed = max(0.05, state.turn_speed - 0.05)
@@ -288,17 +401,26 @@ def main() -> int:
     parser.add_argument("--camera-fps", type=float, default=15.0)
     parser.add_argument("--telemetry-hz", type=float, default=2.0)
     parser.add_argument("--control-hz", type=float, default=10.0)
-    parser.add_argument("--timeout", type=float, default=30.0)
+    parser.add_argument("--timeout", type=float, default=2.0)
+    parser.add_argument("--control-timeout", type=float, default=0.4)
+    parser.add_argument("--deadman-timeout", type=float, default=0.65)
     parser.add_argument("--trail-limit", type=int, default=500)
     parser.add_argument("--window-width", type=int, default=1280)
     parser.add_argument("--window-height", type=int, default=720)
     parser.add_argument("--start-mission", action="store_true")
     args = parser.parse_args()
+    for name in ("camera_fps", "telemetry_hz", "control_hz"):
+        if getattr(args, name) <= 0.0:
+            parser.error(f"--{name.replace('_', '-')} must be positive")
+    if args.control_timeout <= 0.0:
+        parser.error("--control-timeout must be positive")
+    if args.deadman_timeout <= 0.0:
+        parser.error("--deadman-timeout must be positive")
 
     config = load_config(ROOT / args.config)
     sdk_cfg = config["sdk"]
     base_url = sdk_cfg["base_url"]
-    state = SharedState(args.trail_limit)
+    state = SharedState(args.trail_limit, args.deadman_timeout)
 
     if args.start_mission:
         EarthRoverSDKClient(base_url, args.timeout).start_mission()
@@ -307,21 +429,33 @@ def main() -> int:
     workers = [
         threading.Thread(target=camera_worker, args=(state, base_url, args.timeout, args.source, args.camera_fps), daemon=True),
         threading.Thread(target=telemetry_worker, args=(state, base_url, args.timeout, args.telemetry_hz), daemon=True),
-        threading.Thread(target=control_worker, args=(state, base_url, args.timeout, args.control_hz), daemon=True),
+        threading.Thread(target=control_worker, args=(state, base_url, args.control_timeout, args.control_hz), daemon=True),
     ]
     for worker in workers:
         worker.start()
 
     window_name = "Earth Rover Teleop Dashboard"
-    cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
-    cv2.resizeWindow(window_name, args.window_width, args.window_height)
-
     try:
+        try:
+            cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+            cv2.resizeWindow(window_name, args.window_width, args.window_height)
+        except cv2.error as exc:
+            print(
+                "OpenCV GUI is unavailable. Uninstall opencv-python-headless "
+                "and reinstall the GUI-enabled opencv-python package before "
+                "running this dashboard.",
+                file=sys.stderr,
+            )
+            print(f"OpenCV error: {exc}", file=sys.stderr)
+            return 2
+
         while True:
             dashboard = build_dashboard(state, (args.window_width, args.window_height), args.source)
             cv2.imshow(window_name, dashboard)
-            key = cv2.waitKey(1) & 0xFF
-            if key != 255 and not handle_key(state, key):
+            key = cv2.waitKeyEx(1)
+            if key != -1 and not handle_key(state, key):
+                break
+            if cv2.getWindowProperty(window_name, cv2.WND_PROP_VISIBLE) < 1:
                 break
             time.sleep(1.0 / 30.0)
     except KeyboardInterrupt:
@@ -329,14 +463,21 @@ def main() -> int:
     finally:
         with state.lock:
             state.running = False
+            state.request_stop()
+            lamp = state.lamp
         try:
-            with state.api_lock:
-                EarthRoverSDKClient(base_url, args.timeout).send_control(
-                    ControlCommand(0.0, 0.0, lamp=state.lamp, mode="TELEOP_STOP")
+            stop_sdk = EarthRoverSDKClient(base_url, args.control_timeout)
+            for _ in range(3):
+                stop_sdk.send_control(
+                    ControlCommand(0.0, 0.0, lamp=lamp, mode="TELEOP_STOP")
                 )
+                time.sleep(0.05)
         except Exception:
             pass
-        cv2.destroyAllWindows()
+        try:
+            cv2.destroyAllWindows()
+        except cv2.error:
+            pass
 
     return 0
 

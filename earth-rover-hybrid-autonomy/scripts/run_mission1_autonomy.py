@@ -85,7 +85,9 @@ def main() -> int:
             store.publish(status)
             print(
                 f"state={status['state']} linear={status['linear']:.3f} "
-                f"angular={status['angular']:.3f} reason={status['reason']}",
+                f"sdk_angular={status['sdk_angular']:.3f} "
+                f"(internal_angular={status['angular']:.3f}) "
+                f"reason={status['reason']}",
                 flush=True,
             )
             ticks += 1

@@ -4,10 +4,19 @@ import json
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from earth_rover.core.types import FrameData, RoverData
+from earth_rover.navigation.checkpoint_route import CheckpointRoutePlanner
 from training.sam_tp_reproduction import SamTpPrediction
-from training.sam_tp_sdk_shadow import run_shadow_step, write_shadow_summary
+from training.run_sam_tp_sdk_shadow import parse_args
+from training.sam_tp_sdk_shadow import (
+    compose_traversability_overlay,
+    corrected_heading_deg,
+    run_shadow_step,
+    write_shadow_summary,
+)
+from training.sam_tp_dashboard_bridge import DashboardSnapshotStore
 
 
 class ReadOnlyFakeSdk:
@@ -15,10 +24,17 @@ class ReadOnlyFakeSdk:
         self.calls: list[str] = []
         self.image = np.zeros((12, 20, 3), dtype=np.uint8)
         self.image[0, 0] = [10, 20, 30]
+        self.frame_timestamp = 99.9
+        self.sdk_frame_timestamp = 99.8
 
     def get_front_frame(self) -> FrameData:
         self.calls.append("get_front_frame")
-        return FrameData(99.9, self.image.copy(), "front", sdk_timestamp=99.8)
+        return FrameData(
+            self.frame_timestamp,
+            self.image.copy(),
+            "front",
+            sdk_timestamp=self.sdk_frame_timestamp,
+        )
 
     def get_data(self) -> RoverData:
         self.calls.append("get_data")
@@ -59,6 +75,53 @@ class RecordingPredictor:
         )
 
 
+class TelemetryFailingSdk(ReadOnlyFakeSdk):
+    def get_data(self) -> RoverData:
+        self.calls.append("get_data")
+        raise RuntimeError("telemetry timeout")
+
+
+def test_shadow_launcher_defaults_to_browser_only_without_opencv_window() -> None:
+    args = parse_args(
+        [
+            "--upstream-root",
+            "upstream",
+            "--model-config",
+            "model.yaml",
+            "--checkpoint",
+            "checkpoint.pt",
+            "--expected-checkpoint-sha256",
+            "abc",
+            "--output-dir",
+            "output",
+        ]
+    )
+
+    assert args.show_window is False
+    assert args.headless is False
+
+
+def test_shadow_launcher_accepts_read_only_route_latest_override() -> None:
+    args = parse_args(
+        [
+            "--upstream-root",
+            "upstream",
+            "--model-config",
+            "model.yaml",
+            "--checkpoint",
+            "checkpoint.pt",
+            "--expected-checkpoint-sha256",
+            "abc",
+            "--output-dir",
+            "output",
+            "--mission-route-latest-override",
+            "1",
+        ]
+    )
+
+    assert args.mission_route_latest_override == 1
+
+
 def test_shadow_step_uses_read_only_sdk_and_explicit_bgr_to_rgb() -> None:
     sdk = ReadOnlyFakeSdk()
     predictor = RecordingPredictor()
@@ -93,12 +156,16 @@ def test_shadow_step_uses_read_only_sdk_and_explicit_bgr_to_rgb() -> None:
         "/v2/front",
         "/front",
         "/data",
+        "/mission-route",
     ]
     assert abs(float(step.record["acquisition_latency_ms"]) - 20.0) < 1e-9
     assert abs(float(step.record["end_to_end_latency_ms"]) - 190.0) < 1e-9
     assert step.record["shadow_state"] == "CLEAR"
     assert step.record["telemetry_valid"] is True
+    assert step.record["sdk_frame_timestamp_usable"] is True
+    assert step.record["sdk_clock_offset_hours"] is None
     assert step.dashboard_bgr.shape == (242, 300, 3)
+    assert step.overlay_bgr.shape == sdk.image.shape
 
 
 def test_shadow_step_marks_old_frame_stale_without_command() -> None:
@@ -126,6 +193,127 @@ def test_shadow_step_marks_old_frame_stale_without_command() -> None:
     assert step.record["prediction_valid"] is False
     assert step.record["shadow_state"] == "STALE_FRAME"
     assert step.record["command_transmitted"] is False
+
+
+def test_shadow_step_uses_global_heading_to_bias_read_only_local_path() -> None:
+    sdk = ReadOnlyFakeSdk()
+    sdk.image = np.zeros((120, 200, 3), dtype=np.uint8)
+    sdk.frame_timestamp = 99.9
+    planner = CheckpointRoutePlanner(
+        [{"sequence": 1, "latitude": 1.001, "longitude": 2.0}],
+        switch_radius_m=1.0,
+    )
+    clock_values = iter((100.0, 100.01, 100.1))
+    monotonic_values = iter((10.01, 10.03, 10.2))
+
+    step, _ = run_shadow_step(
+        sdk,
+        RecordingPredictor(),
+        frame_index=0,
+        telemetry=None,
+        fetch_telemetry=True,
+        started_monotonic=10.0,
+        checkpoint_sha256="abc",
+        maximum_frame_age_sec=1.0,
+        maximum_telemetry_age_sec=1.0,
+        clock=lambda: next(clock_values),
+        monotonic=lambda: next(monotonic_values),
+        panel_width=100,
+        route_planner=planner,
+    )
+
+    navigation = step.record["navigation"]
+    assert navigation["target_sequence"] == 1
+    assert navigation["target_bearing_deg"] == 0.0
+    assert navigation["heading_error_deg"] == pytest.approx(-3.0)
+    assert step.record["global_target_heading_error_deg"] == pytest.approx(-3.0)
+    assert step.record["image_path_reason"] == "GPS_HEADING_ALIGNED_TRAVERSABLE_PATH"
+    assert step.record["command_transmitted"] is False
+
+
+def test_shadow_step_applies_live_rover_heading_offset_for_route_guidance() -> None:
+    sdk = ReadOnlyFakeSdk()
+    sdk.image = np.zeros((120, 200, 3), dtype=np.uint8)
+    sdk.frame_timestamp = 99.9
+    sdk.sdk_frame_timestamp = 99.8
+    planner = CheckpointRoutePlanner(
+        [{"sequence": 2, "latitude": 30.48268318, "longitude": 114.3026047}],
+        switch_radius_m=1.0,
+    )
+    sdk.get_data = lambda: RoverData(
+        timestamp=99.95,
+        latitude=30.48248291015625,
+        longitude=114.3026351928711,
+        orientation=167.0,
+        speed=0.0,
+        rpms=[0.0, 0.0, 0.0, 0.0],
+        battery=90.0,
+        signal_level=5.0,
+        gps_signal=20.0,
+        raw={},
+        sdk_timestamp=99.85,
+    )
+    clock_values = iter((100.0, 100.01, 100.1))
+    monotonic_values = iter((10.01, 10.03, 10.2))
+
+    step, _ = run_shadow_step(
+        sdk,
+        RecordingPredictor(),
+        frame_index=0,
+        telemetry=None,
+        fetch_telemetry=True,
+        started_monotonic=10.0,
+        checkpoint_sha256="abc",
+        maximum_frame_age_sec=1.0,
+        maximum_telemetry_age_sec=1.0,
+        clock=lambda: next(clock_values),
+        monotonic=lambda: next(monotonic_values),
+        panel_width=100,
+        route_planner=planner,
+        heading_offset_deg=180.0,
+    )
+
+    navigation = step.record["navigation"]
+    assert navigation["current_heading_deg"] == pytest.approx(347.0)
+    assert abs(navigation["heading_error_deg"]) < 15.0
+    assert step.record["navigation_heading_offset_deg"] == 180.0
+
+
+def test_corrected_heading_wraps_and_rejects_invalid_values() -> None:
+    assert corrected_heading_deg(350.0, 20.0) == pytest.approx(10.0)
+    assert corrected_heading_deg(None, 180.0) is None
+    assert corrected_heading_deg(float("nan"), 180.0) is None
+
+
+def test_shadow_step_continues_inference_when_telemetry_fetch_fails() -> None:
+    sdk = TelemetryFailingSdk()
+    predictor = RecordingPredictor()
+    clock_values = iter((100.0, 100.01, 100.1))
+    monotonic_values = iter((10.01, 10.03, 10.2))
+
+    step, telemetry = run_shadow_step(
+        sdk,
+        predictor,
+        frame_index=0,
+        telemetry=None,
+        fetch_telemetry=True,
+        started_monotonic=10.0,
+        checkpoint_sha256="abc",
+        maximum_frame_age_sec=1.0,
+        maximum_telemetry_age_sec=1.0,
+        clock=lambda: next(clock_values),
+        monotonic=lambda: next(monotonic_values),
+        panel_width=100,
+    )
+
+    assert sdk.calls == ["get_front_frame", "get_data"]
+    assert predictor.images
+    assert telemetry is None
+    assert step.record["shadow_state"] == "WAITING_TELEMETRY"
+    assert step.record["prediction_valid"] is True
+    assert step.record["telemetry_valid"] is False
+    assert "telemetry timeout" in step.record["telemetry_error"]
+    assert step.record["navigation"] is None
 
 
 def test_shadow_step_reports_stale_telemetry_separately() -> None:
@@ -161,6 +349,33 @@ def test_shadow_step_reports_stale_telemetry_separately() -> None:
     assert step.record["telemetry_valid"] is False
     assert step.record["shadow_state"] == "STALE_TELEMETRY"
     assert step.record["command_transmitted"] is False
+
+
+def test_shadow_step_tolerates_explicit_whole_hour_sdk_clock_offset() -> None:
+    sdk = ReadOnlyFakeSdk()
+    sdk.frame_timestamp = 32500.0
+    clock_values = iter((32500.0, 32500.01, 32500.1))
+    monotonic_values = iter((10.01, 10.03, 10.2))
+
+    step, _ = run_shadow_step(
+        sdk,
+        RecordingPredictor(),
+        frame_index=0,
+        telemetry=None,
+        fetch_telemetry=False,
+        started_monotonic=10.0,
+        checkpoint_sha256="abc",
+        maximum_frame_age_sec=1.0,
+        maximum_telemetry_age_sec=1.0,
+        clock=lambda: next(clock_values),
+        monotonic=lambda: next(monotonic_values),
+        panel_width=100,
+    )
+
+    assert step.record["sdk_frame_age_sec"] == 32400.3
+    assert step.record["sdk_clock_offset_hours"] == 9
+    assert step.record["sdk_frame_timestamp_usable"] is False
+    assert step.record["prediction_valid"] is True
 
 
 def test_shadow_summary_records_no_sdk_write_or_motion(tmp_path: Path) -> None:
@@ -219,4 +434,51 @@ def test_shadow_launcher_contains_no_sdk_write_call() -> None:
         assert ".send_control(" not in source
         assert ".start_mission(" not in source
         assert ".end_mission(" not in source
-        assert ".report_checkpoint(" not in source
+    assert ".report_checkpoint(" not in source
+
+    assert ".get_mission_route(" in launcher
+    assert "--show-window" in launcher
+    assert "--mission-route-latest-override" in launcher
+
+
+def test_browser_bridge_publishes_latest_overlay_and_read_only_status() -> None:
+    store = DashboardSnapshotStore()
+    initial = store.get()
+    assert initial.status["ready"] is False
+    assert initial.status["command_transmitted"] is False
+
+    image = np.full((10, 16, 3), 80, dtype=np.uint8)
+    store.publish(
+        image,
+        {
+            "shadow_state": "CLEAR",
+            "frame_index": 3,
+            "inference_latency_ms": 91.0,
+            "end_to_end_latency_ms": 130.0,
+            "effective_fps": 7.5,
+            "score_min": 0.1,
+            "score_mean": 0.6,
+            "score_max": 0.9,
+            "image_path_valid": True,
+            "image_path_reason": "CONNECTED_HIGH_TRAVERSABILITY_IMAGE_PATH",
+            "sdk_clock_offset_hours": 9,
+        },
+    )
+    snapshot = store.get()
+
+    assert snapshot.status["ready"] is True
+    assert snapshot.status["frame_index"] == 3
+    assert snapshot.status["command_transmitted"] is False
+    assert snapshot.status["sdk_clock_offset_hours"] == 9
+    assert snapshot.jpeg is not None
+    assert snapshot.jpeg.startswith(b"\xff\xd8")
+
+
+def test_compose_traversability_overlay_preserves_source_geometry() -> None:
+    image = np.zeros((12, 20, 3), dtype=np.uint8)
+    score = np.full((12, 20), 0.75, dtype=np.float32)
+
+    overlay = compose_traversability_overlay(image, score)
+
+    assert overlay.shape == image.shape
+    assert overlay.dtype == np.uint8

@@ -2,9 +2,11 @@ import base64
 
 import cv2
 import numpy as np
+import pytest
+import requests
 
 from earth_rover.core.types import ControlCommand
-from earth_rover.sdk_client import EarthRoverSDKClient
+from earth_rover.sdk_client import EarthRoverSDKClient, SDKClientError
 
 
 class FakeResponse:
@@ -53,6 +55,23 @@ def test_front_frame_uses_v2_front_and_front_frame_key():
     assert client.session.calls[0][0:2] == ("GET", "/v2/front")
 
 
+def test_front_frame_returns_last_good_frame_after_transient_sdk_failure():
+    first = client_with(
+        {("GET", "/v2/front"): {"front_frame": encoded_image(), "timestamp": 1.0}}
+    )
+    cached = first.get_front_frame()
+    first.session = FakeSession({})
+
+    recovered = first.get_front_frame()
+
+    assert recovered is cached
+    assert recovered.sdk_timestamp == 1.0
+    assert [call[0:2] for call in first.session.calls] == [
+        ("GET", "/v2/front"),
+        ("GET", "/front"),
+    ]
+
+
 def test_mission_and_checkpoint_endpoints_match_official_sdk():
     routes = {
         ("POST", "/start-mission"): {"message": "Mission started successfully"},
@@ -62,6 +81,7 @@ def test_mission_and_checkpoint_endpoints_match_official_sdk():
         },
         ("POST", "/checkpoint-reached"): {"message": "Checkpoint reached successfully"},
         ("POST", "/end-mission"): {"message": "Mission ended successfully"},
+        ("GET", "/mission-status"): {"mission_active": True},
     }
     client = client_with(routes)
 
@@ -70,6 +90,7 @@ def test_mission_and_checkpoint_endpoints_match_official_sdk():
     assert client.get_checkpoint_state()["latest_scanned_checkpoint"] == 0.0
     assert client.report_checkpoint() is True
     assert client.end_mission() is True
+    assert client.get_mission_status()["mission_active"] is True
 
     assert [call[0:2] for call in client.session.calls] == [
         ("POST", "/start-mission"),
@@ -77,7 +98,74 @@ def test_mission_and_checkpoint_endpoints_match_official_sdk():
         ("GET", "/checkpoints-list"),
         ("POST", "/checkpoint-reached"),
         ("POST", "/end-mission"),
+        ("GET", "/mission-status"),
     ]
+
+
+class ErrorResponse:
+    def __init__(self, status_code, body):
+        self.status_code = status_code
+        self.text = body
+        self.content = body.encode()
+
+    def raise_for_status(self):
+        raise requests.HTTPError(f"{self.status_code} Client Error", response=self)
+
+    def json(self):
+        return {}
+
+
+class FailingSession:
+    def __init__(self, response):
+        self.response = response
+        self.calls = []
+
+    def request(self, method, url, timeout=None, **kwargs):
+        self.calls.append((method, url, timeout, kwargs))
+        return self.response
+
+
+def test_checkpoint_report_failure_surfaces_response_body():
+    client = EarthRoverSDKClient("http://localhost:8000", 1.0)
+    session = FailingSession(ErrorResponse(422, '{"error":"expected checkpoint 3"}'))
+    client.session = session
+
+    with pytest.raises(SDKClientError) as excinfo:
+        client.report_checkpoint_details()
+
+    assert "expected checkpoint 3" in str(excinfo.value)
+
+
+def test_checkpoint_report_uses_longer_timeout_than_control_loop_calls():
+    client = EarthRoverSDKClient("http://localhost:8000", 1.0)
+    session = FailingSession(ErrorResponse(422, "{}"))
+    client.session = session
+
+    with pytest.raises(SDKClientError):
+        client.report_checkpoint_details()
+
+    assert client.checkpoint_timeout >= 5.0
+    assert session.calls[0][2] == client.checkpoint_timeout
+    assert session.calls[0][2] > client.timeout
+
+
+def test_cached_mission_route_is_read_only() -> None:
+    client = client_with(
+        {
+            ("GET", "/mission-route"): {
+                "checkpoints_list": [{"sequence": 1, "latitude": 30.1, "longitude": 114.1}],
+                "latest_scanned_checkpoint": 0,
+                "mission_active": True,
+                "route_loaded": True,
+            }
+        }
+    )
+
+    route = client.get_mission_route()
+
+    assert route["route_loaded"] is True
+    assert route["checkpoints"][0]["sequence"] == 1
+    assert [call[0:2] for call in client.session.calls] == [("GET", "/mission-route")]
 
 
 def test_control_payload_matches_official_sdk():

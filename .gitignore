@@ -42,6 +42,10 @@ datasets/*
 /experiments/
 /external/
 
+# Raw FrodoBots ride dumps (imu/gps/control csv + camera recordings) that
+# occasionally land inside a project folder instead of $HOME/datasets/.
+**/output_rides_*/
+
 # Generated training artifacts stay on local/NAS storage.
 **/checkpoints/
 **/manifests/

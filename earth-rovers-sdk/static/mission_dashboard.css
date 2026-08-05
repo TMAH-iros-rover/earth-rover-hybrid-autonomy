@@ -90,6 +90,33 @@ main {
   gap: 8px;
 }
 
+.mission-picker {
+  min-height: 36px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 4px 8px;
+  border: 1px solid #4b5258;
+  border-radius: 4px;
+  background: #181b1e;
+}
+
+.mission-picker span {
+  color: #9da5ab;
+  font-size: 11px;
+  text-transform: uppercase;
+}
+
+.mission-picker input {
+  width: 120px;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: #f2f4f5;
+  font: inherit;
+  font-size: 13px;
+}
+
 button,
 .button-link {
   min-height: 36px;
@@ -122,6 +149,23 @@ button.primary {
 button.danger {
   border-color: #a34646;
   background: #773333;
+}
+
+button.emergency-stop {
+  min-height: 44px;
+  padding: 8px 18px;
+  border: 2px solid #ff8a8a;
+  background: #b3131b;
+  color: #fff;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  box-shadow: 0 0 0 2px rgba(179, 19, 27, 0.25);
+}
+
+button.emergency-stop:hover,
+button.emergency-stop:focus-visible {
+  background: #e01b24;
+  outline: 3px solid rgba(255, 138, 138, 0.45);
 }
 
 button.small {
@@ -167,6 +211,73 @@ button.small {
   height: 100%;
   object-fit: contain;
   display: none;
+}
+
+.camera-tools,
+.view-switch,
+.perception-legend,
+.perception-legend span {
+  display: flex;
+  align-items: center;
+}
+
+.camera-tools {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 7px;
+}
+
+.view-switch {
+  gap: 4px;
+}
+
+.view-switch button.selected {
+  border-color: #2fbf71;
+  background: #195f3c;
+}
+
+.perception-legend {
+  min-height: 38px;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  padding: 8px 12px;
+  color: #aeb5ba;
+  font-size: 10px;
+}
+
+.perception-legend span {
+  gap: 5px;
+}
+
+#sam-tp-metrics {
+  margin-left: auto;
+  color: #d8dde0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.score-swatch {
+  width: 18px;
+  height: 8px;
+  display: inline-block;
+  border-radius: 2px;
+}
+
+.score-swatch.low { background: #002aff; }
+.score-swatch.high { background: #e51b00; }
+
+.path-swatch {
+  width: 18px;
+  height: 3px;
+  display: inline-block;
+  background: white;
+  box-shadow: 0 0 0 2px #27c95b;
+}
+
+.goal-swatch {
+  width: 18px;
+  height: 3px;
+  display: inline-block;
+  background: #28d7d1;
 }
 
 #camera-placeholder {
@@ -221,6 +332,73 @@ dd {
 
 .checkpoint-list li {
   padding: 4px 0;
+}
+
+#mission-map {
+  width: 100%;
+  height: 300px;
+  background: #111416;
+}
+
+.map-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  padding: 8px 10px;
+  color: #aeb5ba;
+  font-size: 10px;
+}
+
+.map-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.legend-dot {
+  width: 9px;
+  height: 9px;
+  display: inline-block;
+  border-radius: 50%;
+}
+
+.legend-dot.rover { background: #ff5d57; }
+.legend-dot.checkpoint { background: #2fbf71; }
+
+.legend-line {
+  width: 15px;
+  height: 3px;
+  display: inline-block;
+}
+
+.legend-line.route { background: #36a3ff; }
+.legend-line.global { background: #35d6c1; }
+.legend-line.trail { background: #d85cff; }
+
+.checkpoint-map-icon {
+  min-width: 25px;
+  height: 25px;
+  padding: 0 4px;
+  border: 2px solid #f2f4f5;
+  border-radius: 13px;
+  background: #24794d;
+  color: white;
+  font-weight: 700;
+  line-height: 21px;
+  text-align: center;
+  box-shadow: 0 1px 4px #000a;
+}
+
+.checkpoint-map-icon.reached { background: #687078; }
+.checkpoint-map-icon.next { background: #177bd1; }
+
+.rover-map-icon {
+  width: 22px;
+  height: 22px;
+  border: 3px solid white;
+  border-radius: 50% 50% 50% 0;
+  background: #e84d47;
+  box-shadow: 0 1px 5px #000c;
 }
 
 .response-panel {

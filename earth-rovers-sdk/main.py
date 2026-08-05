@@ -592,8 +592,28 @@ async def get_checkpoints_list():
             detail="Failed to retrieve checkpoints list",
         )
 
+    # advance_cached_checkpoint() tracks progress from /checkpoint-reached
+    # only in this process's memory -- the cloud's checkpoints_list response
+    # doesn't carry it back. Overwriting checkpoints_list_data wholesale on
+    # every refresh (e.g. the dashboard's periodic poll while a mission is
+    # active) previously reset latest_scanned_checkpoint to whatever (or
+    # nothing) the cloud response contains, making a rover that had already
+    # reported checkpoint 1 look like it was back at 0 and confusing every
+    # consumer of /mission-route. Never let a refresh regress progress.
+    previous_latest = _safe_int(checkpoints_list_data.get("latest_scanned_checkpoint"))
     checkpoints_list_data = response.json()
+    if previous_latest is not None:
+        cloud_latest = _safe_int(checkpoints_list_data.get("latest_scanned_checkpoint"))
+        if cloud_latest is None or cloud_latest < previous_latest:
+            checkpoints_list_data["latest_scanned_checkpoint"] = previous_latest
     return checkpoints_list_data
+
+
+def _safe_int(value) -> int | None:
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return None
 
 
 async def auth():
@@ -996,9 +1016,16 @@ async def favicon():
     return Response(status_code=204)
 
 
-def _local_service_json(url: str, offline_payload: dict, timeout: float = 0.2) -> dict:
+async def _local_service_json(url: str, offline_payload: dict, timeout: float = 0.2) -> dict:
+    # These same-origin proxies are polled by the dashboard as often as every
+    # 250ms. A synchronous requests call here blocks this process's single
+    # event loop for up to `timeout`, which starves every other concurrent
+    # request this server is handling -- including the SAM-TP shadow
+    # process's own GET /front frame fetches, which then time out and fall
+    # back to a stale cached frame (observed as SAM-TP getting stuck in
+    # STALE_FRAME while the dashboard tab was open).
     try:
-        response = requests.get(url, timeout=timeout)
+        response = await asyncio.to_thread(requests.get, url, timeout=timeout)
         response.raise_for_status()
         payload = response.json()
         return payload if isinstance(payload, dict) else offline_payload
@@ -1011,7 +1038,7 @@ async def sam_tp_status_proxy():
     """Same-origin proxy to avoid browser console noise when SAM-TP is offline."""
 
     return JSONResponse(
-        content=_local_service_json(
+        content=await _local_service_json(
             "http://127.0.0.1:8001/status",
             {
                 "service": "sam-tp-shadow",
@@ -1026,7 +1053,9 @@ async def sam_tp_status_proxy():
 @app.get("/sam-tp-overlay.jpg")
 async def sam_tp_overlay_proxy():
     try:
-        response = requests.get("http://127.0.0.1:8001/overlay.jpg", timeout=0.5)
+        response = await asyncio.to_thread(
+            requests.get, "http://127.0.0.1:8001/overlay.jpg", timeout=0.5
+        )
         response.raise_for_status()
         return Response(content=response.content, media_type="image/jpeg")
     except Exception:
@@ -1041,7 +1070,7 @@ async def autonomy_status_proxy():
     """Same-origin proxy to avoid browser console noise when autonomy is offline."""
 
     return JSONResponse(
-        content=_local_service_json(
+        content=await _local_service_json(
             "http://127.0.0.1:8002/status",
             {
                 "service": "mission1-autonomy",
@@ -1056,9 +1085,9 @@ async def autonomy_status_proxy():
     )
 
 
-def _local_service_post(url: str, offline_detail: str, timeout: float = 0.5) -> JSONResponse:
+async def _local_service_post(url: str, offline_detail: str, timeout: float = 0.5) -> JSONResponse:
     try:
-        response = requests.post(url, timeout=timeout)
+        response = await asyncio.to_thread(requests.post, url, timeout=timeout)
         if response.content:
             payload = response.json()
         else:
@@ -1072,7 +1101,7 @@ def _local_service_post(url: str, offline_detail: str, timeout: float = 0.5) -> 
 
 @app.post("/autonomy-stop")
 async def autonomy_stop_proxy():
-    return _local_service_post(
+    return await _local_service_post(
         "http://127.0.0.1:8002/stop",
         "Autonomy controller is offline",
     )
@@ -1080,7 +1109,7 @@ async def autonomy_stop_proxy():
 
 @app.post("/autonomy-resume")
 async def autonomy_resume_proxy():
-    return _local_service_post(
+    return await _local_service_post(
         "http://127.0.0.1:8002/resume",
         "Autonomy controller is offline",
     )
@@ -1255,7 +1284,13 @@ async def checkpoint_reached(request: Request):
         "longitude": longitude,
     }
 
-    response = requests.post(
+    # Run the blocking cloud call off the event loop. This handler is on the
+    # same single-threaded loop as /mission-status and /control; a synchronous
+    # requests.post() here stalls those endpoints for the full duration of the
+    # upstream call, which is what produced the cascading timeouts observed
+    # downstream in Mission1's controller.
+    response = await asyncio.to_thread(
+        requests.post,
         FRODOBOTS_API_URL + "/sdk/checkpoint_reached",
         headers=headers,
         json=payload,

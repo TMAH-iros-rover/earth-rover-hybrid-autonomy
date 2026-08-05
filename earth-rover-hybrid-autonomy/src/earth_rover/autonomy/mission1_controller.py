@@ -69,6 +69,8 @@ class Mission1ControlConfig:
     confidence_slowdown_gain: float = 0.70
     curvature_slowdown_gain: float = 0.65
     angular_deadband: float = 0.0
+    search_rotate_angular: float = 0.22
+    search_rotate_timeout_sec: float = 10.0
 
     @classmethod
     def from_dict(cls, config: dict[str, Any]) -> "Mission1ControlConfig":
@@ -92,6 +94,8 @@ class Mission1ControlConfig:
             "control_error_cooldown_sec": self.control_error_cooldown_sec,
             "transient_invalid_grace_sec": self.transient_invalid_grace_sec,
             "max_plan_age_sec": self.max_plan_age_sec,
+            "search_rotate_angular": self.search_rotate_angular,
+            "search_rotate_timeout_sec": self.search_rotate_timeout_sec,
         }
         if any(not math.isfinite(value) or value <= 0.0 for value in positive.values()):
             raise ValueError("Mission1 positive control settings must be finite and positive")
@@ -116,6 +120,11 @@ class Mission1ControlConfig:
                 raise ValueError(f"{name} must be in [0, 1]")
         if not math.isfinite(self.angular_deadband) or self.angular_deadband < 0.0:
             raise ValueError("angular_deadband must be finite and non-negative")
+        if not self.rotate_exit_threshold_deg < self.rotate_to_goal_heading_deg:
+            raise ValueError(
+                "rotate_exit_threshold_deg must be less than rotate_to_goal_heading_deg "
+                "to provide a hysteresis band"
+            )
 
 
 class SamStatusSource:
@@ -175,6 +184,11 @@ class Mission1Autonomy:
         self._last_valid_path_reason = ""
         self._last_target_sequence: int | None = None
         self._checkpoint_transition_until = -math.inf
+        self._rotating_to_goal = False
+        self._rotate_direction: float | None = None
+        self._searching_for_path = False
+        self._search_direction: float | None = None
+        self._search_started_monotonic = -math.inf
         self._last_command = ControlCommand(0.0, 0.0, mode="STARTUP_STOP")
         self.status: dict[str, Any] = {
             "service": "mission1-autonomy",
@@ -207,6 +221,11 @@ class Mission1Autonomy:
             self._last_valid_path_reason = ""
             self._last_target_sequence = None
             self._checkpoint_transition_until = -math.inf
+            self._rotating_to_goal = False
+            self._rotate_direction = None
+            self._searching_for_path = False
+            self._search_direction = None
+            self._search_started_monotonic = -math.inf
         self._mission_was_active = active
 
         if not active:
@@ -274,6 +293,20 @@ class Mission1Autonomy:
                     target_sequence=sequence,
                 )
             if sequence not in self._reported_sequences:
+                latest_scanned = _integer(mission.get("latest_scanned_checkpoint"))
+                if latest_scanned is not None and latest_scanned >= sequence:
+                    # The SDK already advanced past this checkpoint, most
+                    # likely because a prior report succeeded server-side
+                    # after our client gave up waiting for the response.
+                    # Accept it locally instead of sending a duplicate report,
+                    # which the cloud rejects with 422.
+                    self._reported_sequences.add(sequence)
+                    return self._publish(
+                        "CHECKPOINT_REPORTED",
+                        f"checkpoint {sequence} already accepted by SDK; next={sequence + 1}",
+                        stop_transmitted,
+                        target_sequence=sequence,
+                    )
                 if now_mono - self._last_report_time < self.settings.checkpoint_report_cooldown_sec:
                     return self._publish(
                         "CHECKPOINT_WAIT",
@@ -283,7 +316,20 @@ class Mission1Autonomy:
                 # Apply cooldown before the network call as well, preventing a
                 # rejected cloud report from being retried at control-loop rate.
                 self._last_report_time = now_mono
-                response = self.sdk.report_checkpoint_details()
+                try:
+                    response = self.sdk.report_checkpoint_details()
+                except Exception as exc:
+                    # Don't assume the report failed server-side too: the
+                    # next tick re-checks latest_scanned_checkpoint before
+                    # retrying, so a slow-but-successful cloud call is picked
+                    # up without sending a second, duplicate report.
+                    return self._publish(
+                        "CHECKPOINT_WAIT",
+                        f"checkpoint {sequence} report failed, will verify before retry: "
+                        f"{type(exc).__name__}: {exc}",
+                        stop_transmitted,
+                        target_sequence=sequence,
+                    )
                 self._reported_sequences.add(sequence)
                 next_sequence = response.get("next_checkpoint_sequence")
                 return self._publish(
@@ -377,7 +423,45 @@ class Mission1Autonomy:
                     held,
                     target_sequence=sequence,
                 )
+            if invalid.startswith("near-field unsafe"):
+                search = self._search_rotate_command(sam, now_mono)
+                if search is not None:
+                    command = self.command_filter.apply(
+                        search, dt, frame_is_stale=False, data_is_stale=False
+                    )
+                    self._last_command = command
+                    if not self.live_control_enabled:
+                        return self._publish(
+                            "DRY_RUN_SEARCH_ROTATE",
+                            f"would rotate to search for a drivable direction: {invalid}",
+                            False,
+                            command,
+                            target_sequence=sequence,
+                        )
+                    if not self._try_send_control(command, now_mono):
+                        return self._publish(
+                            "ERROR_STOP",
+                            f"SDK control bridge rejected search-rotate command: "
+                            f"{self._last_control_error}",
+                            False,
+                            ControlCommand(0.0, 0.0, mode="CONTROL_SEND_FAILED"),
+                            target_sequence=sequence,
+                        )
+                    return self._publish(
+                        "SEARCH_ROTATE",
+                        f"rotating to search for a drivable direction: {invalid}",
+                        True,
+                        command,
+                        target_sequence=sequence,
+                    )
+                # Search timed out without finding a clear direction; stop
+                # and let the operator intervene instead of spinning forever.
+                self._searching_for_path = False
+                self._search_direction = None
             return self._stop("SAFETY_STOP", invalid)
+        if self._searching_for_path:
+            self._searching_for_path = False
+            self._search_direction = None
         heading_deg = float(sam["local_path_selected_heading_deg"])
         path_score = float(sam["path_mean_score"])
         raw = self._command_from_path(
@@ -661,21 +745,118 @@ class Mission1Autonomy:
     def _rotate_to_goal_command(self, navigation: dict[str, Any]) -> ControlCommand | None:
         heading_error = _finite(navigation.get("heading_error_deg"))
         if heading_error is None:
+            self._rotating_to_goal = False
+            self._rotate_direction = None
             return None
-        if abs(heading_error) < self.settings.rotate_to_goal_heading_deg:
-            return None
-        direction = 1.0 if heading_error > 0.0 else -1.0
+        magnitude = abs(heading_error)
+        # Enter at rotate_to_goal_heading_deg but only exit once the error
+        # drops below the lower rotate_exit_threshold_deg. Without this
+        # hysteresis band, a heading_error hovering near the entry threshold
+        # (or overshooting past zero from the fixed-rate turn below) flips
+        # this mode on and off every tick, which shows up as the rover
+        # spinning back and forth instead of settling.
+        if self._rotating_to_goal:
+            if magnitude < self.settings.rotate_exit_threshold_deg:
+                self._rotating_to_goal = False
+                self._rotate_direction = None
+                return None
+        else:
+            if magnitude < self.settings.rotate_to_goal_heading_deg:
+                return None
+            self._rotating_to_goal = True
+            self._rotate_direction = None
+        if self._rotate_direction is None:
+            # Latch the direction once, at the moment we commit to rotating,
+            # and keep it for the rest of this rotate streak instead of
+            # recomputing sign(heading_error) every tick. When the target is
+            # nearly straight behind (~180 deg), GPS/heading noise can push
+            # the raw error across the +/-180 wrap point (e.g. +179 -> -179),
+            # which is a tiny real heading change but flips this sign every
+            # time it happens. Recomputing direction each tick made the
+            # rover reverse mid-turn and get stuck oscillating instead of
+            # completing the turn.
+            self._rotate_direction = 1.0 if heading_error > 0.0 else -1.0
+        direction = self._rotate_direction
+        # Taper the rate down as the error approaches the exit band so the
+        # rotation doesn't overshoot past zero error and immediately
+        # re-trigger in the opposite direction.
+        span = max(
+            1e-6,
+            self.settings.rotate_to_goal_heading_deg - self.settings.rotate_exit_threshold_deg,
+        )
+        taper = _clamp((magnitude - self.settings.rotate_exit_threshold_deg) / span, 0.25, 1.0)
         angular = direction * min(
             self.settings.rotate_to_goal_angular,
             self.settings.max_angular,
-        )
+        ) * taper
         return ControlCommand(0.0, angular, mode="ROTATE_TO_GOAL")
+
+    def _search_rotate_command(
+        self, sam: dict[str, Any], now_mono: float
+    ) -> ControlCommand | None:
+        """Rotate in place to bring a new view into frame when every forward
+        candidate is blocked, instead of just sitting in front of an obstacle.
+
+        The local planner only scores image-space curves drawn on the
+        current camera frame, so if an obstacle fills the whole
+        +/-maximum_visual_heading_deg field of view there is no candidate
+        that can route around it from where the rover is currently facing --
+        it has to physically turn before a clear direction even exists to
+        evaluate. Returns None once the search has run for too long without
+        finding one, so the caller falls back to a real SAFETY_STOP rather
+        than spinning forever.
+        """
+
+        if not self._searching_for_path:
+            self._searching_for_path = True
+            self._search_started_monotonic = now_mono
+            self._search_direction = self._pick_search_direction(sam)
+        elif now_mono - self._search_started_monotonic > self.settings.search_rotate_timeout_sec:
+            return None
+        angular = self._search_direction * min(
+            self.settings.search_rotate_angular, self.settings.max_angular
+        )
+        return ControlCommand(0.0, angular, mode="SEARCH_ROTATE")
+
+    @staticmethod
+    def _pick_search_direction(sam: dict[str, Any]) -> float:
+        """Turn toward whichever side looked least blocked, if we know."""
+
+        planner = sam.get("planner")
+        candidates = planner.get("candidate_scores") if isinstance(planner, dict) else None
+        if isinstance(candidates, list):
+            left_scores = []
+            right_scores = []
+            for candidate in candidates:
+                if not isinstance(candidate, dict):
+                    continue
+                heading = _finite(candidate.get("heading_deg"))
+                near_field = _finite(candidate.get("near_field"))
+                if heading is None or near_field is None:
+                    continue
+                if heading < 0:
+                    left_scores.append(near_field)
+                elif heading > 0:
+                    right_scores.append(near_field)
+            if left_scores or right_scores:
+                left_best = max(left_scores) if left_scores else -1.0
+                right_best = max(right_scores) if right_scores else -1.0
+                if left_best > right_best:
+                    return -1.0
+                if right_best > left_best:
+                    return 1.0
+        return 1.0
 
     def _reset_local_history(self) -> None:
         self._consecutive_path_invalid = 0
         self._last_valid_raw_command = None
         self._last_valid_path_time = -math.inf
         self._last_valid_path_reason = ""
+        self._rotating_to_goal = False
+        self._rotate_direction = None
+        self._searching_for_path = False
+        self._search_direction = None
+        self._search_started_monotonic = -math.inf
         self.command_filter = CommandFilter(self._filter_config)
 
     def _stop(self, state: str, reason: str) -> dict[str, Any]:
@@ -721,6 +902,10 @@ class Mission1Autonomy:
             "command_transmitted": transmitted,
             "linear": float(command.linear),
             "angular": float(command.angular),
+            # The value actually sent to the rover over /control, once
+            # command_transmitted is true. "angular" above stays in Mission1's
+            # internal positive-right convention; this is post sign-flip.
+            "sdk_angular": mission1_to_sdk_angular(command.angular),
             "reason": reason,
             "updated_timestamp": self.clock(),
             **extra,

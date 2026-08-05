@@ -186,6 +186,123 @@ def test_control_status_reports_rtm_transport_ready_without_recent_command() -> 
     assert status["reason"] == "RTM_CONTROL_TRANSPORT_READY"
 
 
+def test_front_restarts_a_dead_browser_after_repeated_failures(monkeypatch) -> None:
+    monkeypatch.setattr(browser_service, "CAMERA_FAILURE_RESTART_THRESHOLD", 2)
+    monkeypatch.setattr(browser_service, "CAMERA_FAILURE_RESTART_MIN_WINDOW_SEC", 0.0)
+
+    class FakePage:
+        async def evaluate(self, _script, _uid):
+            raise RuntimeError("execution context was destroyed")
+
+    class FakeBrowser:
+        def __init__(self):
+            self.closed = False
+
+        async def close(self):
+            self.closed = True
+
+    service = browser_service.BrowserService()
+    fake_browser = FakeBrowser()
+    service.browser = fake_browser
+    service.page = FakePage()
+    service.initialization_stage = "READY"
+
+    async def run_test():
+        for _ in range(2):
+            with pytest.raises(browser_service.BrowserServiceError):
+                await service.front(timeout_sec=0.01)
+
+    asyncio.run(run_test())
+
+    assert fake_browser.closed is True
+    assert service.browser is None
+    assert service.page is None
+    assert service.initialization_stage == "NOT_STARTED"
+    assert service._consecutive_camera_failures == 0
+
+
+def test_front_success_resets_the_failure_counter(monkeypatch) -> None:
+    monkeypatch.setattr(browser_service, "CAMERA_FAILURE_RESTART_THRESHOLD", 2)
+    monkeypatch.setattr(browser_service, "CAMERA_FAILURE_RESTART_MIN_WINDOW_SEC", 0.0)
+
+    class ScriptedPage:
+        def __init__(self, results):
+            self.results = list(results)
+
+        async def evaluate(self, _script, _uid):
+            result = self.results.pop(0)
+            if isinstance(result, Exception):
+                raise result
+            return result
+
+    service = browser_service.BrowserService()
+    service.browser = object()
+    # fail, succeed (resets the streak), fail again -- if the reset didn't
+    # happen this second failure alone would hit the threshold of 2 and
+    # restart the browser.
+    service.page = ScriptedPage(
+        [
+            RuntimeError("transient"),
+            "data:image/png;base64,frame",
+            RuntimeError("transient"),
+        ]
+    )
+    service.initialization_stage = "READY"
+
+    async def run_test():
+        with pytest.raises(browser_service.BrowserServiceError):
+            await service.front(timeout_sec=0.01)
+        frame = await service.front(timeout_sec=0.01)
+        with pytest.raises(browser_service.BrowserServiceError):
+            await service.front(timeout_sec=0.01)
+        return frame
+
+    frame = asyncio.run(run_test())
+
+    assert frame == "data:image/png;base64,frame"
+    assert service._consecutive_camera_failures == 1
+    assert service.browser is not None
+
+
+def test_front_does_not_restart_on_a_fast_failure_burst(monkeypatch) -> None:
+    # Regression test: a live run hit repeated failures that raced ahead of
+    # real elapsed time (evaluate() raising almost instantly once the page
+    # was already dead) and tore down a browser whose RTM control channel
+    # was still healthy, right as a drive command was in flight. The count
+    # alone must not be enough to restart within a burst shorter than
+    # CAMERA_FAILURE_RESTART_MIN_WINDOW_SEC.
+    monkeypatch.setattr(browser_service, "CAMERA_FAILURE_RESTART_THRESHOLD", 2)
+    monkeypatch.setattr(browser_service, "CAMERA_FAILURE_RESTART_MIN_WINDOW_SEC", 60.0)
+
+    class FakePage:
+        async def evaluate(self, _script, _uid):
+            raise RuntimeError("execution context was destroyed")
+
+    class FakeBrowser:
+        def __init__(self):
+            self.closed = False
+
+        async def close(self):
+            self.closed = True
+
+    service = browser_service.BrowserService()
+    fake_browser = FakeBrowser()
+    service.browser = fake_browser
+    service.page = FakePage()
+    service.initialization_stage = "READY"
+
+    async def run_test():
+        for _ in range(5):
+            with pytest.raises(browser_service.BrowserServiceError):
+                await service.front(timeout_sec=0.01)
+
+    asyncio.run(run_test())
+
+    assert fake_browser.closed is False
+    assert service.browser is fake_browser
+    assert service._consecutive_camera_failures == 5
+
+
 def test_control_status_reports_uninitialized_publisher() -> None:
     service = browser_service.BrowserService()
 
