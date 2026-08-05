@@ -5,7 +5,10 @@ project:
 
 sdk:
   base_url: "http://localhost:8000"
-  request_timeout_sec: 0.25
+  # Agora RTM control acknowledgement is commonly slower than 250 ms on the
+  # Wuhan link. Allow the observed round trip plus transient network jitter;
+  # otherwise a successfully delivered command can look like a failure.
+  request_timeout_sec: 1.0
   max_consecutive_failures: 3
 
 control:
@@ -45,6 +48,37 @@ urban:
   obstacle_weight: 0.60
   turning_cost_weight: 0.10
 
+navigation:
+  # Applied only when computing GPS checkpoint heading error; raw telemetry
+  # remains unchanged in logs.  Keep this at 0 unless a calibration run proves
+  # a fixed rover-specific heading offset.
+  rover_heading_offset_deg: 0.0
+  heading_filter_alpha: 0.3
+  target_heading_deadband_deg: 6.0
+  large_heading_change_deg: 35.0
+
+planner:
+  mode: motion_primitives
+  candidate_headings_deg: [-45, -30, -15, 0, 15, 30, 45]
+  traversability_weight: 1.0
+  goal_heading_weight: 0.7
+  continuity_weight: 0.45
+  curvature_weight: 0.10
+  near_field_risk_weight: 1.5
+  path_score_threshold: 0.45
+  near_field_stop_threshold: 0.25
+  near_field_percentile: 10
+  full_path_percentile: 15
+  candidate_score_ema_alpha: 0.35
+  min_candidate_commit_sec: 0.8
+  transient_invalid_grace_sec: 0.8
+  max_plan_age_sec: 1.5
+  switch_score_margin: 0.08
+  switch_confirm_count: 2
+  corridor_half_width_ratio: 0.025
+  maximum_visual_heading_deg: 55.0
+  debug_candidate_scores: true
+
 perception:
   input_width: 320
   input_height: 240
@@ -80,4 +114,3 @@ logging:
   save_frames: true
   save_debug_images: true
   log_dir: "logs"
-

@@ -1,5 +1,62 @@
 # Earth Rover Hybrid Autonomy
 
+## Safe keyboard teleoperation
+
+Run the local SDK server first from the sibling `earth-rovers-sdk` directory,
+then launch the OpenCV dashboard from this project. The teleop starts disarmed
+and does not send control commands until `E` is pressed.
+
+```bash
+cd ~/IROS2026/earth-rovers-sdk
+hypercorn main:app --bind 127.0.0.1:8000
+```
+
+In a second terminal, verify the read-only endpoints before enabling control:
+
+```bash
+curl http://127.0.0.1:8000/mission-status
+curl --max-time 45 http://127.0.0.1:8000/data
+curl http://127.0.0.1:8000/connection-diagnostics
+```
+
+In direct-bot mode, leave `MISSION_SLUG` unset and do not call
+`/start-mission`. A ready rover reports RTM telemetry, at least one RTC remote
+user, and a non-empty front frame in `connection-diagnostics`. If RTM is
+`LOGGED_IN`/`JOINED` but `remoteUserCount` is zero and telemetry is absent, the
+local SDK is connected but the rover is not publishing to the assigned channel.
+
+Then start the dashboard:
+
+```bash
+cd ~/IROS2026/earth-rover-hybrid-autonomy
+python3 scripts/teleop_dashboard.py \
+  --control-timeout 0.4 \
+  --deadman-timeout 0.65
+```
+
+This Dell workstation uses the GUI-enabled `opencv-python` package for both
+projects. Do not install `opencv-python-headless` into the same user Python
+environment because it can replace the GUI build and make `cv2.namedWindow()`
+fail.
+
+Controls:
+
+- `E`: arm control; motion remains zero until a direction key is pressed;
+- hold `W`/`S`: forward/reverse at the displayed low-speed setting;
+- hold `A`/`D`: left/right using the project convention (`+angular` left);
+- `Space`: immediately disarm and request three stop commands;
+- `L`: toggle the lamp;
+- `+`/`-`: adjust speed within the teleop caps (`linear <= 0.25`,
+  `angular <= 0.40`);
+- `Q` or `Esc`: stop and exit.
+
+Keyboard input is treated as a heartbeat because OpenCV does not expose key-up
+events. If repeats stop for the configured dead-man timeout, that axis returns
+to zero. The SDK server independently sends a stop if `/control` heartbeats
+cease. Confirm the rover's angular sign with its wheels clear or in an open,
+controlled area before ground driving. Keep `Space` ready and do not use the
+browser examples in `earth-rovers-sdk/examples/web` for live testing.
+
 ## Goal
 Urban GPS MVP for Earth Rover Challenge using latency-aware hybrid reactive controller.
 
@@ -65,20 +122,120 @@ live rover. See `docs/experiments/sam_tp_reproduction.md`.
 
 ### Read-only SDK shadow dashboard
 
-The first SDK integration stage fetches the live front frame and telemetry,
-runs SAM-TP once per frame, and displays original, overlay, score, telemetry,
-and latency panels. It calls only camera/data reads and has no control or
-mission endpoint:
+The SDK shadow stage fetches the live front frame, telemetry, and the SDK
+server's already-loaded checkpoint route. It runs SAM-TP once per frame and
+publishes the overlay and navigation metrics to the browser dashboard. It has
+no control, mission-start, checkpoint-report, or mission-end call:
 
 ```bash
-MAX_FRAMES=100 HEADLESS=true ./scripts/run_sam_tp_sdk_shadow.sh
+./scripts/run_sam_tp_sdk_shadow.sh
 ```
 
-Omit `HEADLESS=true` on the Dell desktop to open the OpenCV dashboard. Outputs
-are written under
+The process also serves the latest browser overlay and metrics at
+`http://127.0.0.1:8001`. Open the SDK mission dashboard at
+`http://127.0.0.1:8000/dashboard`; after the first inference, its `SAM-TP`
+camera button becomes available. The overlay uses blue for lower and red for
+higher SAM-TP traversability evidence. A cyan line shows the GPS shortest-path
+heading to the next checkpoint. By default, the local overlay is now the
+selected motion primitive corridor rather than a newly connected pixel path
+every frame. The map shows the current-position-to-next-checkpoint GPS segment
+separately. Until camera calibration is completed, the local path is an
+image-space visualization and does not represent metric obstacle clearance.
+
+Planner mode is selected by `planner.mode` in config or with a launch override:
+
+```bash
+./scripts/run_sam_tp_sdk_shadow.sh --planner-mode motion_primitives
+./scripts/run_sam_tp_sdk_shadow.sh --planner-mode connected_path
+./scripts/run_sam_tp_sdk_shadow.sh --planner-mode gps_only
+```
+
+Supported modes:
+
+- `motion_primitives` (default): evaluates fixed image-space candidate
+  trajectories `[-45, -30, -15, 0, 15, 30, 45]` degrees. GPS target bearing is
+  the primary guide; SAM-TP scores each candidate corridor for local safety and
+  cost. Candidate score EMA, minimum commit time, switch confirmation, and
+  time-based held plans reduce frame-to-frame left/right switching.
+- `connected_path`: keeps the previous connected high-score image-space path
+  behavior for rollback and A/B comparison.
+- `gps_only`: steers from filtered GPS heading at very low speed and only uses
+  SAM-TP near-field score as an emergency safety check. Use this to separate
+  GPS/controller/network issues from SAM-TP local planning issues.
+
+The `/status` payload remains backward-compatible:
+`state`, `path_valid`, `path_reason`, `path_mean_score`,
+`local_path_selected_heading_deg`, and `navigation` are still present. New
+debug fields include `planner.mode`, selected candidate index/heading/score,
+candidate scores, `near_field_safe`, `near_field_score`, `trajectory_valid`,
+`trajectory_quality`, `planner_confidence`, `using_held_plan`, and
+`plan_age_sec`.
+
+The main planner parameters live in `configs/default.yaml` and can be
+overridden by `configs/mission1_live.yaml`: candidate headings,
+traversability weight, GPS heading penalty, continuity penalty, curvature
+penalty, near-field risk penalty, `path_score_threshold`,
+`near_field_stop_threshold`, candidate score EMA alpha, minimum commit time,
+transient invalid grace time, max plan age, switch score margin, and switch
+confirmation count.
+
+The separate OpenCV window is disabled by default. Set `SHOW_WINDOW=true` only
+when the legacy local window is explicitly needed. Outputs are written under
 `$HOME/datasets/review_bundles/sam_tp_sdk_shadow/<RUN_ID>/`. Every record sets
 `command_transmitted=false`. This is perception shadow mode, not planner
 integration or autonomous driving.
+
+### Mission1 live local-path control
+
+Mission1 control is a separate process from SAM-TP. Start the SDK server and
+the SAM-TP shadow process first, then arm the conservative live controller in a
+third terminal:
+
+```bash
+./scripts/run_mission1_autonomy.sh --enable-live-control
+```
+
+It serves controller state at `http://127.0.0.1:8002/status` and waits without
+moving until `Start Mission` succeeds in the browser dashboard. During an
+active mission it sends a 5 Hz bounded command from the latest accepted local
+trajectory, stops before reporting each reached checkpoint, and resets local
+planner/controller history after checkpoint transitions. Large GPS heading
+errors enter `ROTATING_TO_GOAL` with zero linear speed instead of requiring a
+forward camera path while the target lies outside the front view. Transient
+local planner uncertainty enters `PATH_HOLD`/cautious hold for a short time if
+the near field remains safe; near-field danger, stale SAM-TP, invalid
+GPS/heading, control bridge failure, request failures, or process shutdown
+still result in a zero command. The SDK also has a 0.75 s command-heartbeat
+watchdog.
+
+Use `EMERGENCY STOP` in the dashboard (or press `Space`) for an immediate
+latched stop and `Resume Auto` to release it. `End Mission` triggers the same
+stop before ending the cloud
+mission. Running the launcher without `--enable-live-control` is a no-write
+dry-run. Because image heading is not yet camera-calibrated metric curvature,
+the initial live limits in `configs/mission1_live.yaml` are deliberately low
+and the first drive must be attended.
+
+Recommended Mission1 live A/B order:
+
+1. `./scripts/run_sam_tp_sdk_shadow.sh --planner-mode gps_only` plus dry-run
+   autonomy to verify GPS heading and controller signs.
+2. `./scripts/run_sam_tp_sdk_shadow.sh --planner-mode motion_primitives` in
+   shadow mode; verify selected candidate, confidence, and near-field fields.
+3. `./scripts/run_mission1_autonomy.sh --enable-live-control` only after the
+   dashboard shows fresh SAM-TP, valid GPS, and stable candidate selection.
+4. Compare the same route with `--planner-mode connected_path` only for
+   rollback/A-B diagnostics.
+
+For offline planner stability checks:
+
+```bash
+PYTHONPATH=src:. scripts/compare_mission1_planners.py
+```
+
+The script prints selected candidate switch count, switches per second,
+angular sign flip count, valid ratio, held-plan duration, full-stop count,
+near-field stop count, and mean planner confidence for synthetic sequences.
 
 ## Development order
 1. SDK client

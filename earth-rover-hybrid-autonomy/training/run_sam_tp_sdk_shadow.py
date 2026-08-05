@@ -9,6 +9,7 @@ import time
 from pathlib import Path
 
 import cv2
+import numpy as np
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -17,11 +18,15 @@ for import_root in (ROOT, ROOT / "src"):
         sys.path.insert(0, str(import_root))
 
 from earth_rover.sdk_client import EarthRoverSDKClient  # noqa: E402
+from earth_rover.navigation.checkpoint_route import CheckpointRoutePlanner  # noqa: E402
 from earth_rover.planning.trajectory_sampler import (  # noqa: E402
     DEFAULT_CURVATURES,
     ConstantCurvatureTrajectorySampler,
 )
 from earth_rover.utils.config import load_config  # noqa: E402
+from earth_rover.planning.motion_primitive_planner import (  # noqa: E402
+    MotionPrimitivePlanner,
+)
 from training.sam_tp_reproduction import (  # noqa: E402
     OFFICIAL_COMMIT,
     SamTpPredictor,
@@ -32,6 +37,7 @@ from training.sam_tp_sdk_shadow import (  # noqa: E402
     run_shadow_step,
     write_shadow_summary,
 )
+from training.sam_tp_dashboard_bridge import SamTpDashboardServer  # noqa: E402
 from training.sam_tp_phase1_review import SamTpPhase1FrameProcessor  # noqa: E402
 
 
@@ -56,15 +62,37 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--panel-width", type=int, default=480)
     parser.add_argument("--max-frames", type=int)
     parser.add_argument("--maximum-consecutive-failures", type=int, default=5)
-    parser.add_argument("--headless", action="store_true")
+    parser.add_argument(
+        "--show-window",
+        action="store_true",
+        help="also open the legacy OpenCV window; browser-only is the default",
+    )
+    parser.add_argument("--headless", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--route-refresh-hz", type=float, default=1.0)
+    parser.add_argument(
+        "--mission-route-latest-override",
+        type=int,
+        help=(
+            "read-only route preview override for latest_scanned_checkpoint; "
+            "does not call any SDK write endpoint"
+        ),
+    )
     parser.add_argument("--snapshot-interval", type=int, default=25)
+    parser.add_argument("--dashboard-host", default="127.0.0.1")
+    parser.add_argument("--dashboard-port", type=int, default=8001)
+    parser.add_argument("--no-browser-bridge", action="store_true")
+    parser.add_argument(
+        "--planner-mode",
+        choices=("connected_path", "motion_primitives", "gps_only"),
+        help="override planner.mode from config for A/B testing",
+    )
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
-    if args.target_fps <= 0.0 or args.telemetry_hz <= 0.0:
-        raise SystemExit("target-fps and telemetry-hz must be positive")
+    if args.target_fps <= 0.0 or args.telemetry_hz <= 0.0 or args.route_refresh_hz <= 0.0:
+        raise SystemExit("target-fps, telemetry-hz, and route-refresh-hz must be positive")
     if (
         args.maximum_frame_age_sec <= 0.0
         or args.maximum_telemetry_age_sec <= 0.0
@@ -77,8 +105,11 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("max-frames must be positive")
     if args.maximum_consecutive_failures <= 0:
         raise SystemExit("maximum-consecutive-failures must be positive")
-    if not args.headless and sys.platform.startswith("linux") and not os.environ.get("DISPLAY"):
-        raise SystemExit("DISPLAY is unavailable; rerun with --headless")
+    if not 1 <= args.dashboard_port <= 65535:
+        raise SystemExit("dashboard-port must be in [1, 65535]")
+    show_window = args.show_window and not args.headless
+    if show_window and sys.platform.startswith("linux") and not os.environ.get("DISPLAY"):
+        raise SystemExit("DISPLAY is unavailable; omit --show-window")
 
     upstream = Path(args.upstream_root).expanduser().resolve()
     model_config = Path(args.model_config).expanduser().resolve()
@@ -101,7 +132,14 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     config = load_config(config_path)
+    planner_cfg = dict(config.get("planner", {}))
+    if args.planner_mode is not None:
+        planner_cfg["mode"] = args.planner_mode
     sdk_cfg = config["sdk"]
+    navigation_cfg = config.get("navigation", {})
+    heading_offset_deg = float(navigation_cfg.get("rover_heading_offset_deg", 0.0))
+    if not np.isfinite(heading_offset_deg):
+        raise SystemExit("navigation.rover_heading_offset_deg must be finite")
     sdk = EarthRoverSDKClient(
         sdk_cfg["base_url"],
         args.request_timeout_sec,
@@ -129,6 +167,7 @@ def main(argv: list[str] | None = None) -> int:
         ).sample(),
         checkpoint_sha[:12],
     )
+    local_planner = MotionPrimitivePlanner(planner_cfg)
 
     output.mkdir(parents=True)
     jsonl_path = output / "shadow_frames.jsonl"
@@ -136,13 +175,26 @@ def main(argv: list[str] | None = None) -> int:
     failures: list[dict[str, object]] = []
     telemetry = None
     telemetry_interval = 1.0 / args.telemetry_hz
+    route_interval = 1.0 / args.route_refresh_hz
     next_telemetry = 0.0
+    next_route_refresh = 0.0
+    route_planner = None
+    route_signature = None
     delay = 1.0 / args.target_fps
     started = time.monotonic()
     consecutive_failures = 0
     window_name = "Earth Rover SAM-TP Read-Only Shadow"
-    if not args.headless:
+    if show_window:
         cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+    dashboard_server = None
+    if not args.no_browser_bridge:
+        dashboard_server = SamTpDashboardServer(
+            args.dashboard_host,
+            args.dashboard_port,
+        )
+        dashboard_server.start()
+        host, port = dashboard_server.address
+        print(f"SAM-TP browser bridge: http://{host}:{port}/status", flush=True)
     print("SAM-TP SDK shadow mode: GET-only, command_transmitted=false", flush=True)
     try:
         with jsonl_path.open("w", encoding="utf-8") as jsonl:
@@ -150,6 +202,45 @@ def main(argv: list[str] | None = None) -> int:
             while args.max_frames is None or frame_index < args.max_frames:
                 loop_started = time.monotonic()
                 try:
+                    if loop_started >= next_route_refresh:
+                        try:
+                            route = sdk.get_mission_route()
+                            latest_scanned = (
+                                args.mission_route_latest_override
+                                if args.mission_route_latest_override is not None
+                                else route["latest_scanned_checkpoint"]
+                            )
+                            signature = json.dumps(
+                                {
+                                    "checkpoints": route["checkpoints"],
+                                    "latest": latest_scanned,
+                                },
+                                sort_keys=True,
+                            )
+                            if route["route_loaded"] and signature != route_signature:
+                                route_planner = CheckpointRoutePlanner(
+                                    route["checkpoints"],
+                                    float(config["urban"]["waypoint_switch_radius_m"]),
+                                    latest_scanned_checkpoint=int(latest_scanned or 0),
+                                    heading_filter_alpha=float(
+                                        navigation_cfg.get("heading_filter_alpha", 1.0)
+                                    ),
+                                    target_heading_deadband_deg=float(
+                                        navigation_cfg.get("target_heading_deadband_deg", 0.0)
+                                    ),
+                                    large_heading_change_deg=float(
+                                        navigation_cfg.get("large_heading_change_deg", 180.0)
+                                    ),
+                                )
+                                route_signature = signature
+                            elif not route["route_loaded"]:
+                                route_planner = None
+                                route_signature = None
+                        except Exception:
+                            # Route guidance is optional; perception shadow must
+                            # continue when the SDK server has no loaded mission.
+                            pass
+                        next_route_refresh = loop_started + route_interval
                     fetch_telemetry = loop_started >= next_telemetry
                     step, telemetry = run_shadow_step(
                         sdk,
@@ -163,10 +254,18 @@ def main(argv: list[str] | None = None) -> int:
                         args.maximum_telemetry_age_sec,
                         panel_width=args.panel_width,
                         phase1_processor=phase1_processor,
+                        route_planner=route_planner,
+                        local_planner=local_planner,
+                        heading_offset_deg=heading_offset_deg,
                     )
                     if fetch_telemetry:
-                        next_telemetry = loop_started + telemetry_interval
+                        telemetry_backoff = (
+                            3.0 if step.record.get("telemetry_error") else telemetry_interval
+                        )
+                        next_telemetry = loop_started + telemetry_backoff
                     records.append(step.record)
+                    if dashboard_server is not None:
+                        dashboard_server.store.publish(step.overlay_bgr, step.record)
                     consecutive_failures = 0
                     jsonl.write(json.dumps(step.record, sort_keys=True) + "\n")
                     jsonl.flush()
@@ -183,13 +282,15 @@ def main(argv: list[str] | None = None) -> int:
                         f"fps={float(step.record['effective_fps']):.2f}",
                         flush=True,
                     )
-                    if not args.headless:
+                    if show_window:
                         cv2.imshow(window_name, step.dashboard_bgr)
                         key = cv2.waitKey(1) & 0xFF
                         if key in (27, ord("q")):
                             break
                     frame_index += 1
                 except Exception as exc:
+                    if dashboard_server is not None:
+                        dashboard_server.store.publish_error(exc)
                     failure = {
                         "timestamp": time.time(),
                         "frame_index": frame_index,
@@ -213,8 +314,10 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         pass
     finally:
-        if not args.headless:
+        if show_window:
             cv2.destroyAllWindows()
+        if dashboard_server is not None:
+            dashboard_server.close()
         write_shadow_summary(
             output,
             records,

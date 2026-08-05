@@ -11,9 +11,17 @@ import cv2
 import numpy as np
 
 from earth_rover.core.types import FrameData, RoverData
+from earth_rover.navigation.checkpoint_route import (
+    CheckpointRoutePlanner,
+    GlobalRouteState,
+)
 from earth_rover.planning.trajectory_sampler import (
     DEFAULT_CURVATURES,
     ConstantCurvatureTrajectorySampler,
+)
+from earth_rover.planning.motion_primitive_planner import (
+    MotionPrimitivePlan,
+    MotionPrimitivePlanner,
 )
 from training.sam_tp_phase1_review import (
     SamTpPhase1FrameProcessor,
@@ -44,6 +52,7 @@ _PROVISIONAL_PHASE1_TRAJECTORIES = ConstantCurvatureTrajectorySampler(
 @dataclass(frozen=True)
 class ShadowStep:
     dashboard_bgr: np.ndarray
+    overlay_bgr: np.ndarray
     record: dict[str, object]
 
 
@@ -61,6 +70,9 @@ def run_shadow_step(
     monotonic: Callable[[], float] = time.monotonic,
     panel_width: int = 480,
     phase1_processor: SamTpPhase1FrameProcessor | None = None,
+    route_planner: CheckpointRoutePlanner | None = None,
+    local_planner: MotionPrimitivePlanner | None = None,
+    heading_offset_deg: float = 0.0,
 ) -> tuple[ShadowStep, RoverData | None]:
     """Fetch one live frame, infer once, and return a read-only dashboard step.
 
@@ -73,8 +85,12 @@ def run_shadow_step(
     frame = sdk.get_front_frame()
     frame_received = clock()
     frame_received_monotonic = monotonic()
+    telemetry_error = None
     if fetch_telemetry:
-        telemetry = sdk.get_data()
+        try:
+            telemetry = sdk.get_data()
+        except Exception as exc:
+            telemetry_error = f"{type(exc).__name__}: {exc}"
     if frame.image.ndim != 3 or frame.image.shape[2] != 3:
         raise ValueError("SDK front frame must be an HxWx3 BGR image")
     if frame.image.dtype != np.uint8:
@@ -82,14 +98,48 @@ def run_shadow_step(
 
     image_bgr = np.asarray(frame.image)
     image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
+    navigation = (
+        route_planner.update(
+            telemetry.latitude,
+            telemetry.longitude,
+            corrected_heading_deg(telemetry.orientation, heading_offset_deg),
+        )
+        if route_planner is not None and telemetry is not None
+        else None
+    )
     processor = phase1_processor or SamTpPhase1FrameProcessor(
         predictor,
         _PROVISIONAL_PHASE1_TRAJECTORIES,
         checkpoint_sha256[:12],
     )
-    phase1 = processor.process(image_rgb, float(frame.timestamp))
+    phase1 = processor.process(
+        image_rgb,
+        float(frame.timestamp),
+        target_heading_error_rad=(
+            navigation.heading_error_rad if navigation is not None else None
+        ),
+    )
     prediction = phase1.prediction
     traversability = phase1.traversability
+    primitive_plan: MotionPrimitivePlan | None = None
+    image_path = phase1.image_path
+    planner_latency_sec = 0.0
+    if local_planner is not None and local_planner.config.mode != "connected_path":
+        planner_started_monotonic = monotonic()
+        primitive_plan = local_planner.plan(
+            traversability.score_map,
+            traversability.valid_mask,
+            target_heading_error_rad=(
+                navigation.heading_error_rad if navigation is not None else None
+            ),
+            checkpoint_sequence=(
+                navigation.target_sequence if navigation is not None else None
+            ),
+            timestamp=float(frame.timestamp),
+            navigation=navigation_record(navigation),
+        )
+        image_path = primitive_plan.image_path
+        planner_latency_sec = monotonic() - planner_started_monotonic
     finished = clock()
     finished_monotonic = monotonic()
     acquisition_latency_sec = frame_received_monotonic - request_started_monotonic
@@ -108,11 +158,19 @@ def run_shadow_step(
     )
     if sdk_frame_age_sec is not None and not math.isfinite(sdk_frame_age_sec):
         raise ValueError("SDK frame age is not finite")
+    sdk_clock_offset_hours = _timezone_offset_hours(
+        sdk_frame_age_sec,
+        maximum_frame_age_sec,
+    )
+    sdk_frame_timestamp_usable = (
+        sdk_frame_age_sec is not None and sdk_clock_offset_hours is None
+    )
     frame_stale = (
         local_frame_age_sec < 0.0
         or local_frame_age_sec > maximum_frame_age_sec
         or (
             sdk_frame_age_sec is not None
+            and sdk_frame_timestamp_usable
             and (
                 sdk_frame_age_sec < -maximum_frame_age_sec
                 or sdk_frame_age_sec > maximum_frame_age_sec
@@ -131,6 +189,8 @@ def run_shadow_step(
     )
     if frame_stale:
         shadow_state = "STALE_FRAME"
+    elif telemetry_error is not None and telemetry is None:
+        shadow_state = "WAITING_TELEMETRY"
     elif telemetry_stale:
         shadow_state = "STALE_TELEMETRY"
     else:
@@ -145,9 +205,13 @@ def run_shadow_step(
         "sdk_frame_timestamp": frame.sdk_timestamp,
         "local_frame_age_sec": local_frame_age_sec,
         "sdk_frame_age_sec": sdk_frame_age_sec,
+        "sdk_frame_timestamp_usable": sdk_frame_timestamp_usable,
+        "sdk_clock_offset_hours": sdk_clock_offset_hours,
         "telemetry_age_sec": telemetry_age_sec,
+        "telemetry_error": telemetry_error,
         "acquisition_latency_ms": acquisition_latency_sec * 1000.0,
         "inference_latency_ms": prediction.inference_time_ms,
+        "planner_latency_ms": planner_latency_sec * 1000.0,
         "end_to_end_latency_ms": end_to_end_latency_sec * 1000.0,
         "effective_fps": effective_fps,
         "score_min": float(prediction.traversability_score.min()),
@@ -158,16 +222,60 @@ def run_shadow_step(
         "candidate_trajectory_count": len(phase1.trajectories),
         "trajectory_geometry_only": True,
         "camera_projection_applied": False,
-        "image_path_valid": phase1.image_path.valid,
-        "image_path_reason": phase1.image_path.reason,
-        "image_path_mean_score": phase1.image_path.mean_score,
-        "image_path_visualization_only": True,
+        "image_path_valid": image_path.valid,
+        "image_path_reason": image_path.reason,
+        "image_path_mean_score": image_path.mean_score,
+        "local_path_length_px": image_path.path_length_px,
+        "local_path_goal_alignment_weight": image_path.goal_alignment_weight,
+        "local_path_smoothing_method": image_path.smoothing_method,
+        "local_path_smoothing_applied": image_path.smoothing_applied,
+        "local_path_smoothing_iterations": image_path.smoothing_iterations,
+        "local_path_selected_heading_deg": _degrees_or_none(
+            image_path.selected_heading_rad
+        ),
+        "local_path_heading_residual_deg": _degrees_or_none(
+            image_path.heading_residual_rad
+        ),
+        "global_target_heading_error_deg": _degrees_or_none(
+            image_path.target_heading_error_rad
+        ),
+        "planner": _planner_record(primitive_plan),
+        "near_field_safe": (
+            primitive_plan.near_field_safe if primitive_plan is not None else image_path.valid
+        ),
+        "near_field_score": (
+            primitive_plan.near_field_score if primitive_plan is not None else image_path.minimum_score
+        ),
+        "trajectory_valid": (
+            primitive_plan.trajectory_valid if primitive_plan is not None else image_path.valid
+        ),
+        "trajectory_quality": (
+            primitive_plan.trajectory_quality if primitive_plan is not None else image_path.mean_score
+        ),
+        "planner_confidence": (
+            primitive_plan.planner_confidence if primitive_plan is not None else image_path.mean_score
+        ),
+        "plan_age_sec": (
+            primitive_plan.plan_age_sec if primitive_plan is not None else 0.0
+        ),
+        "using_held_plan": (
+            primitive_plan.using_held_plan if primitive_plan is not None else False
+        ),
+        "image_path_metric_calibrated": False,
+        "image_path_experimental_control_input": True,
         "prediction_valid": not frame_stale,
-        "telemetry_valid": not telemetry_stale,
+        "telemetry_valid": telemetry_error is None and not telemetry_stale,
         "shadow_state": shadow_state,
         "checkpoint_sha256": checkpoint_sha256,
         "telemetry": telemetry_record(telemetry),
-        "sdk_allowed_read_endpoints": ["/v2/front", "/front", "/data"],
+        "navigation_heading_offset_deg": heading_offset_deg,
+        "navigation": navigation_record(navigation),
+        "sdk_allowed_read_endpoints": [
+            "/v2/front",
+            "/front",
+            "/data",
+            "/mission-route",
+        ],
         "command_transmitted": False,
     }
     dashboard = compose_shadow_dashboard(
@@ -176,9 +284,54 @@ def run_shadow_step(
         record,
         telemetry,
         panel_width,
-        phase1.image_path,
+        image_path,
     )
-    return ShadowStep(dashboard, record), telemetry
+    overlay = compose_traversability_overlay(
+        image_bgr,
+        prediction.traversability_score,
+        image_path,
+    )
+    return ShadowStep(dashboard, overlay, record), telemetry
+
+
+def _timezone_offset_hours(
+    age_sec: float | None,
+    tolerance_sec: float,
+) -> int | None:
+    """Recognize a whole-hour camera timestamp offset without hiding drift."""
+
+    if age_sec is None or abs(age_sec) <= tolerance_sec:
+        return None
+    hours = round(age_sec / 3600.0)
+    if hours == 0 or abs(hours) > 14:
+        return None
+    residual = age_sec - hours * 3600.0
+    return hours if abs(residual) <= tolerance_sec else None
+
+
+def compose_traversability_overlay(
+    image_bgr: np.ndarray,
+    score: np.ndarray,
+    image_path=None,
+) -> np.ndarray:
+    """Blend SAM-TP evidence and the display-only path into the source frame."""
+
+    if image_bgr.ndim != 3 or image_bgr.shape[2] != 3:
+        raise ValueError("image_bgr must have shape HxWx3")
+    if image_bgr.dtype != np.uint8:
+        raise ValueError("image_bgr must use uint8 pixels")
+    if score.shape != image_bgr.shape[:2]:
+        raise ValueError("score shape must match the SDK frame")
+    heatmap_bgr = cv2.cvtColor(score_to_heatmap(score), cv2.COLOR_RGB2BGR)
+    overlay = cv2.addWeighted(image_bgr, 0.58, heatmap_bgr, 0.42, 0.0)
+    if image_path is not None:
+        path_rgb = draw_image_path_rgb(
+            cv2.cvtColor(overlay, cv2.COLOR_BGR2RGB),
+            image_path,
+            0.018,
+        )
+        overlay = cv2.cvtColor(path_rgb, cv2.COLOR_RGB2BGR)
+    return overlay
 
 
 def telemetry_record(data: RoverData | None) -> dict[str, object] | None:
@@ -195,6 +348,50 @@ def telemetry_record(data: RoverData | None) -> dict[str, object] | None:
         "battery": data.battery,
         "signal_level": data.signal_level,
         "gps_signal": data.gps_signal,
+    }
+
+
+def _planner_record(plan: MotionPrimitivePlan | None) -> dict[str, object]:
+    if plan is None:
+        return {
+            "mode": "connected_path",
+            "near_field_safe": None,
+            "trajectory_valid": None,
+            "planner_confidence": None,
+            "using_held_plan": False,
+            "plan_age_sec": 0.0,
+        }
+    return plan.to_status(include_candidates=True)
+
+
+def corrected_heading_deg(
+    heading_deg: float | None,
+    offset_deg: float,
+) -> float | None:
+    if heading_deg is None:
+        return None
+    heading = float(heading_deg)
+    offset = float(offset_deg)
+    if not math.isfinite(heading) or not math.isfinite(offset):
+        return None
+    return (heading + offset) % 360.0
+
+
+def navigation_record(state: GlobalRouteState | None) -> dict[str, object] | None:
+    if state is None:
+        return None
+    return {
+        "route_polyline": [list(point) for point in state.route_polyline],
+        "target_sequence": state.target_sequence,
+        "distance_to_target_m": state.distance_to_target_m,
+        "target_bearing_deg": state.target_bearing_deg,
+        "current_heading_deg": state.current_heading_deg,
+        "heading_error_deg": _degrees_or_none(state.heading_error_rad),
+        "gps_valid": state.gps_valid,
+        "heading_valid": state.heading_valid,
+        "reached": state.reached,
+        "finished": state.finished,
+        "reason": state.reason,
     }
 
 
@@ -342,7 +539,12 @@ def write_shadow_summary(
         "effective_fps": records[-1]["effective_fps"] if records else 0.0,
         "checkpoint_path": str(Path(checkpoint_path).expanduser().resolve()),
         "checkpoint_sha256": checkpoint_sha256,
-        "sdk_allowed_read_endpoints": ["/v2/front", "/front", "/data"],
+        "sdk_allowed_read_endpoints": [
+            "/v2/front",
+            "/front",
+            "/data",
+            "/mission-route",
+        ],
         "sdk_write_endpoints": [],
         "command_transmitted": False,
         "live_motion_command_sent_by_process": False,
@@ -381,3 +583,7 @@ def _text(
         1,
         cv2.LINE_AA,
     )
+
+
+def _degrees_or_none(value: float | None) -> float | None:
+    return math.degrees(value) if value is not None else None

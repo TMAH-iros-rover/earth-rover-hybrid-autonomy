@@ -1,0 +1,60 @@
+mission1_autonomy:
+  loop_hz: 5.0
+  sam_status_url: "http://127.0.0.1:8001/status"
+  sam_timeout_sec: 0.5
+  maximum_sam_age_sec: 1.5
+
+  # Low-speed live limits with enough command authority to clear the rover's
+  # observed drive/steering deadzone. These remain well below teleop caps and
+  # still require an attended test because LOCAL PATH is image-space.
+  base_linear: 0.12
+  minimum_linear: 0.08
+  max_linear: 0.15
+  heading_kp: 0.55
+  max_angular: 0.30
+  stop_forward_heading_deg: 50.0
+  rotate_to_goal_heading_deg: 50.0
+  rotate_exit_threshold_deg: 20.0
+  rotate_to_goal_angular: 0.28
+  minimum_path_score: 0.55
+  checkpoint_report_cooldown_sec: 2.0
+  checkpoint_transition_stop_sec: 0.4
+  transient_invalid_grace_sec: 0.8
+  max_plan_age_sec: 1.5
+  path_invalid_grace_ticks: 4
+  held_path_linear_scale: 0.45
+  partial_path_linear_scale: 0.60
+  relaxed_path_linear_scale: 0.75
+  confidence_slowdown_gain: 0.70
+  curvature_slowdown_gain: 0.65
+  angular_deadband: 0.03
+
+control:
+  linear_min: 0.0
+  linear_max: 0.15
+  angular_min: -0.30
+  angular_max: 0.30
+  command_smoothing_alpha: 0.25
+  max_linear_delta_per_sec: 0.18
+  max_angular_delta_per_sec: 0.50
+  reverse_angular_sign_slowdown: true
+  angular_deadband: 0.03
+
+planner:
+  mode: motion_primitives
+  candidate_headings_deg: [-45, -30, -15, 0, 15, 30, 45]
+  traversability_weight: 1.0
+  goal_heading_weight: 0.7
+  continuity_weight: 0.45
+  curvature_weight: 0.10
+  near_field_risk_weight: 1.5
+  path_score_threshold: 0.45
+  near_field_stop_threshold: 0.25
+  near_field_percentile: 10
+  full_path_percentile: 15
+  candidate_score_ema_alpha: 0.35
+  min_candidate_commit_sec: 0.8
+  transient_invalid_grace_sec: 0.8
+  max_plan_age_sec: 1.5
+  switch_score_margin: 0.08
+  switch_confirm_count: 2

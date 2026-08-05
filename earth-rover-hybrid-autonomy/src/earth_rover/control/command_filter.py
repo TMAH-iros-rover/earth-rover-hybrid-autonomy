@@ -16,6 +16,10 @@ class CommandFilter:
         self.alpha = float(control_cfg.get("command_smoothing_alpha", 0.45))
         self.max_linear_delta_per_sec = float(control_cfg.get("max_linear_delta_per_sec", 0.25))
         self.max_angular_delta_per_sec = float(control_cfg.get("max_angular_delta_per_sec", 0.80))
+        self.reverse_angular_sign_slowdown = bool(
+            control_cfg.get("reverse_angular_sign_slowdown", False)
+        )
+        self.angular_deadband = float(control_cfg.get("angular_deadband", 0.0))
         self._previous = ControlCommand(0.0, 0.0)
 
     def apply(
@@ -32,6 +36,19 @@ class CommandFilter:
         if not self._valid(raw_command):
             self._previous = ControlCommand(0.0, 0.0, mode="INVALID_COMMAND_STOP")
             return self._previous
+
+        if (
+            self.reverse_angular_sign_slowdown
+            and self._previous.angular * raw_command.angular < 0.0
+            and abs(self._previous.angular) > self.angular_deadband
+            and abs(raw_command.angular) > self.angular_deadband
+        ):
+            raw_command = ControlCommand(
+                raw_command.linear,
+                0.0,
+                lamp=raw_command.lamp,
+                mode=raw_command.mode,
+            )
 
         smoothed_linear = self.alpha * self._previous.linear + (1.0 - self.alpha) * raw_command.linear
         smoothed_angular = self.alpha * self._previous.angular + (1.0 - self.alpha) * raw_command.angular
@@ -58,4 +75,3 @@ class CommandFilter:
     @staticmethod
     def _valid(command: ControlCommand) -> bool:
         return math.isfinite(command.linear) and math.isfinite(command.angular)
-

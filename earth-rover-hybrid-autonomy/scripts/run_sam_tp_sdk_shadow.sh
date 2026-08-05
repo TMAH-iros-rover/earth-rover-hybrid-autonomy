@@ -18,8 +18,12 @@ MAXIMUM_FRAME_AGE_SEC="${MAXIMUM_FRAME_AGE_SEC:-1.0}"
 MAXIMUM_TELEMETRY_AGE_SEC="${MAXIMUM_TELEMETRY_AGE_SEC:-1.0}"
 REQUEST_TIMEOUT_SEC="${REQUEST_TIMEOUT_SEC:-2.0}"
 MAX_FRAMES="${MAX_FRAMES:-}"
-MAXIMUM_CONSECUTIVE_FAILURES="${MAXIMUM_CONSECUTIVE_FAILURES:-5}"
-HEADLESS="${HEADLESS:-false}"
+MAXIMUM_CONSECUTIVE_FAILURES="${MAXIMUM_CONSECUTIVE_FAILURES:-60}"
+SHOW_WINDOW="${SHOW_WINDOW:-false}"
+DASHBOARD_HOST="${DASHBOARD_HOST:-127.0.0.1}"
+DASHBOARD_PORT="${DASHBOARD_PORT:-8001}"
+MISSION_ROUTE_LATEST_OVERRIDE="${MISSION_ROUTE_LATEST_OVERRIDE:-}"
+PLANNER_MODE="${PLANNER_MODE:-}"
 
 if [[ "$ENV_BACKEND" == "auto" ]]; then
   if command -v conda >/dev/null 2>&1 \
@@ -58,15 +62,30 @@ arguments=(
   --maximum-telemetry-age-sec "$MAXIMUM_TELEMETRY_AGE_SEC"
   --request-timeout-sec "$REQUEST_TIMEOUT_SEC"
   --maximum-consecutive-failures "$MAXIMUM_CONSECUTIVE_FAILURES"
+  --dashboard-host "$DASHBOARD_HOST"
+  --dashboard-port "$DASHBOARD_PORT"
 )
 if [[ -n "$MAX_FRAMES" ]]; then
   arguments+=(--max-frames "$MAX_FRAMES")
 fi
-if [[ "$HEADLESS" == "true" ]]; then
-  arguments+=(--headless)
+if [[ -n "$MISSION_ROUTE_LATEST_OVERRIDE" ]]; then
+  arguments+=(--mission-route-latest-override "$MISSION_ROUTE_LATEST_OVERRIDE")
+fi
+if [[ -n "$PLANNER_MODE" ]]; then
+  arguments+=(--planner-mode "$PLANNER_MODE")
+fi
+if [[ "$SHOW_WINDOW" == "true" ]]; then
+  arguments+=(--show-window)
 fi
 
 cd "$PROJECT_ROOT"
 echo "Starting GET-only SAM-TP SDK shadow dashboard"
+echo "Browser-only mode enabled; set SHOW_WINDOW=true for the legacy OpenCV window"
+if [[ -n "$PLANNER_MODE" ]]; then
+  echo "Planner mode override: $PLANNER_MODE"
+fi
+if [[ -n "$MISSION_ROUTE_LATEST_OVERRIDE" ]]; then
+  echo "Read-only route preview override: latest_scanned_checkpoint=$MISSION_ROUTE_LATEST_OVERRIDE"
+fi
 echo "No /control or mission endpoint will be called"
-env_python training/run_sam_tp_sdk_shadow.py "${arguments[@]}"
+env_python training/run_sam_tp_sdk_shadow.py "${arguments[@]}" "$@"
