@@ -68,7 +68,24 @@ pip3 install -r requirements.txt
 hypercorn main:app --reload
 ```
 
+The mission dashboard is available at `http://127.0.0.1:8000/dashboard`.
+When the sibling hybrid-autonomy SAM-TP shadow process is serving on local port
+8001, the dashboard automatically enables its `SAM-TP` front-camera view. That
+view is perception-only and does not send rover control commands.
+
 4. Now you can check the live streaming of the bot in the following URL: http://localhost:8000
+
+Motion commands are protected by a server-side heartbeat watchdog. After a
+nonzero `/control` command, another command must arrive within
+`CONTROL_WATCHDOG_TIMEOUT_SEC` (default `0.75` seconds), otherwise the SDK sends
+an explicit zero-linear/zero-angular command. Set the value in `.env` before
+starting Hypercorn; it must be finite and positive.
+
+`control_bridge_ready` in `GET /mission-status` means that the local hidden
+browser has an RTM transport capable of publishing rover commands. It is not a
+recent-command heartbeat. Command freshness is reported separately as
+`control_command_fresh`, `last_control_command_age_sec`, and
+`control_watchdog_active`.
 
 ## Documentation
 
@@ -96,8 +113,21 @@ Example response:
 
 ```JSON
 {
-    "message": "Command sent successfully"
+    "message": "Command sent successfully",
+    "result": "COMMAND_PUBLISHED",
+    "control_bridge_ready": true,
+    "control_bridge_reason": "RTM_CONTROL_TRANSPORT_READY"
 }
+```
+
+To verify the RTM command transport without moving the rover, send a zero
+command:
+
+```bash
+curl -i -X POST \
+  http://127.0.0.1:8000/control \
+  -H 'Content-Type: application/json' \
+  -d '{"command":{"linear":0,"angular":0,"lamp":0}}'
 ```
 
 ### GET /data
@@ -571,10 +601,42 @@ screen. The dashboard can be opened before a mission starts.
 - `End Mission` requires browser confirmation and calls `POST /end-mission`.
 - The dashboard does not call `/control` or send movement commands.
 
-When `MISSION_SLUG` is absent, the dashboard enters `DIRECT BOT MODE`. In this
-mode it disables `Start Mission` and `End Mission` because the official SDK does
-not require those endpoints for basic bot testing. Camera and telemetry polling
-start directly. When `MISSION_SLUG` is configured, the dashboard uses the
-mission start/end workflow and checkpoint tracking.
+The dashboard keeps rover connection and mission state separate. `Connect
+Rover` obtains direct-bot tokens and starts live RTC/RTM video, telemetry, and
+GPS. While that preview remains connected, `Get Mission` loads the selected
+checkpoint route and `Start Mission` transitions to tracked mission mode.
+`Disconnect` closes a direct preview after sending stop; `End Mission` ends an
+active tracked mission.
+
+The dashboard also accepts a mission slug at runtime, so changing `.env` is not
+required for each run. Enter `mission-1`, press `Get Mission` to load the
+checkpoint list and route, then press `Start Mission`. The lower-right Leaflet
+map displays numbered checkpoints, the ordered 1→2→3 route, the rover's live GPS
+position and heading, its driven trail, completed checkpoint count, and distance
+to the next checkpoint. Checkpoint state refreshes every two seconds while the
+mission is active. `POST /select-mission` and `POST /start-mission` accept:
+
+```json
+{"mission_slug": "mission-1"}
+```
+
+Use `GET /connection-diagnostics` to distinguish a local bridge problem from
+an offline rover. It reports only boolean token presence and RTC/RTM readiness;
+it does not expose credentials. A healthy live link has RTM state
+`LOGGED_IN`/`JOINED`, telemetry present, at least one RTC remote user, and a
+front frame. RTM joined with zero remote users and no telemetry means the local
+bridge is ready but the rover is not publishing on the assigned channel.
+
+Use the local diagnostic script for timestamp, camera, telemetry, and RTM
+transport checks:
+
+```bash
+python3 scripts/diagnose_sdk_bridge.py --base-url http://127.0.0.1:8000
+python3 scripts/diagnose_sdk_bridge.py \
+  --base-url http://127.0.0.1:8000 \
+  --send-zero-control
+```
+
+The zero-control option sends only `{linear: 0, angular: 0, lamp: 0}`.
 
 The existing RTC page remains available at `/sdk` after a mission starts.

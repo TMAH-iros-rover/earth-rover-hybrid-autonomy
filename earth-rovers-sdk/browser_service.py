@@ -1,10 +1,13 @@
 import asyncio
+import math
 import os
 import shutil
 import time
 from pathlib import Path
 
 from pyppeteer import launch
+from pyppeteer.errors import NetworkError
+from pyppeteer.errors import TimeoutError as PyppeteerTimeoutError
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -13,12 +16,24 @@ load_dotenv()
 FORMAT = os.getenv("IMAGE_FORMAT", "png")
 QUALITY = float(os.getenv("IMAGE_QUALITY", "1.0"))
 HAS_REAR_CAMERA = os.getenv("HAS_REAR_CAMERA", "False").lower() == "true"
+STARTUP_TIMEOUT_SEC = float(os.getenv("BROWSER_STARTUP_TIMEOUT_SEC", "20"))
+TELEMETRY_TIMEOUT_SEC = float(os.getenv("TELEMETRY_READY_TIMEOUT_SEC", "15"))
+CAMERA_TIMEOUT_SEC = float(os.getenv("CAMERA_READY_TIMEOUT_SEC", "20"))
+FRAME_REQUEST_TIMEOUT_SEC = float(os.getenv("FRAME_REQUEST_TIMEOUT_SEC", "1.0"))
 
 if FORMAT not in ["png", "jpeg", "webp"]:
     raise ValueError("Invalid image format. Supported formats: png, jpeg, webp")
 
 if QUALITY < 0 or QUALITY > 1:
     raise ValueError("Invalid image quality. Quality should be between 0 and 1")
+for name, value in (
+    ("BROWSER_STARTUP_TIMEOUT_SEC", STARTUP_TIMEOUT_SEC),
+    ("TELEMETRY_READY_TIMEOUT_SEC", TELEMETRY_TIMEOUT_SEC),
+    ("CAMERA_READY_TIMEOUT_SEC", CAMERA_TIMEOUT_SEC),
+    ("FRAME_REQUEST_TIMEOUT_SEC", FRAME_REQUEST_TIMEOUT_SEC),
+):
+    if not math.isfinite(value) or value <= 0:
+        raise ValueError(f"{name} must be finite and positive")
 
 
 class BrowserServiceError(RuntimeError):
@@ -67,6 +82,154 @@ class BrowserService:
         self.page = None
         self._initialization_lock = asyncio.Lock()
         self.default_viewport = {"width": 3840, "height": 2160}
+        self.initialization_stage = "NOT_STARTED"
+        self.last_error = None
+
+    def status(self) -> dict:
+        return {
+            "stage": self.initialization_stage,
+            "browser_started": self.browser is not None,
+            "page_started": self.page is not None,
+            "last_error": self.last_error,
+        }
+
+    async def control_ready(self) -> bool:
+        """Return whether the browser page can currently send RTM control."""
+
+        return bool((await self.control_status()).get("ready"))
+
+    async def control_status(self) -> dict:
+        """Return RTM command transport readiness without command freshness.
+
+        This intentionally does not depend on recent /control heartbeats.  A
+        connected RTM transport must report ready before autonomy can send its
+        first command; otherwise the SDK and autonomy can deadlock waiting on
+        each other.
+        """
+
+        if self.page is None or self.initialization_stage != "READY":
+            return {
+                "ready": False,
+                "reason": "CONTROL_PUBLISHER_NOT_INITIALIZED",
+                "rtm_connected": False,
+                "rtm_control_transport_ready": False,
+            }
+        try:
+            state = await self.page.evaluate(
+                """() => {
+                  const rtmReady = window.rtm_ready === true;
+                  const channelJoined = window.rtm_channel_state === "JOINED";
+                  const sendMessageReady = typeof window.sendMessage === "function";
+                  const rtcState =
+                    (typeof client !== "undefined" && client && client.connectionState)
+                    || window.rtc_connection_state
+                    || "UNKNOWN";
+                  const banned = Array.isArray(window.rtc_event_history)
+                    && window.rtc_event_history.slice(-5).some(
+                      (event) => event
+                        && event.type === "connection-state-change"
+                        && event.currentState === "DISCONNECTED"
+                        && event.reason === "UID_BANNED"
+                    );
+                  let reason = "RTM_CONTROL_TRANSPORT_READY";
+                  if (!sendMessageReady) {
+                    reason = "CONTROL_PUBLISHER_NOT_INITIALIZED";
+                  } else if (!rtmReady) {
+                    reason = "RTM_NOT_CONNECTED";
+                  } else if (!channelJoined) {
+                    reason = "RTM_CHANNEL_NOT_JOINED";
+                  } else if (banned) {
+                    reason = "RTC_UID_BANNED";
+                  }
+                  const ready = rtmReady && channelJoined && sendMessageReady && !banned;
+                  return {
+                    ready,
+                    reason,
+                    rtm_connected: rtmReady,
+                    rtm_control_transport_ready: ready,
+                    rtm_connection_state: window.rtm_connection_state || "UNKNOWN",
+                    rtm_channel_state: window.rtm_channel_state || "UNKNOWN",
+                    rtm_last_error: window.rtm_last_error || null,
+                    rtm_last_send_state: window.rtm_last_send_state || "NOT_SENT",
+                    rtc_connected: rtcState === "CONNECTED",
+                    rtc_connection_state: rtcState
+                  };
+                }"""
+            )
+            return state if isinstance(state, dict) else {"ready": False, "reason": "UNKNOWN"}
+        except Exception:
+            return {
+                "ready": False,
+                "reason": "CONTROL_TRANSPORT_DIAGNOSTICS_FAILED",
+                "rtm_connected": False,
+                "rtm_control_transport_ready": False,
+            }
+
+    async def diagnostics(self) -> dict:
+        """Return non-sensitive browser/RTC/RTM readiness details."""
+
+        result = self.status()
+        if self.page is None:
+            return result
+        try:
+            page_state = await self.page.evaluate(
+                """() => {
+                  const users =
+                    (typeof remoteUsers !== "undefined" && remoteUsers)
+                    ? remoteUsers
+                    : {};
+                  const channelUsers =
+                    (typeof client !== "undefined" && client && client.remoteUsers)
+                    ? client.remoteUsers
+                    : [];
+                  const frontUser = channelUsers.find(
+                    (user) => String(user.uid) === "1000"
+                  ) || users[1000];
+                  const frontVideo = document.querySelector("#player-1000 video");
+                  return {
+                    rtmConnectionState: window.rtm_connection_state || "UNKNOWN",
+                    rtmChannelState: window.rtm_channel_state || "UNKNOWN",
+                    rtmLastError: window.rtm_last_error || null,
+                    rtmLastSendState: window.rtm_last_send_state || "NOT_SENT",
+                    rtmReady: window.rtm_ready === true,
+                    telemetryPresent: window.rtm_data != null,
+                    sendMessageReady: typeof window.sendMessage === "function",
+                    rtcConnectionState:
+                        (typeof client !== "undefined" && client && client.connectionState)
+                        || window.rtc_connection_state
+                        || "UNKNOWN",
+                    remoteUserCount: channelUsers.length,
+                    remoteUserIds: channelUsers.map((user) => String(user.uid)),
+                    publishedRemoteUserCount: Object.keys(users).length,
+                    publishedRemoteUserIds: Object.keys(users),
+                    videoElementCount: document.querySelectorAll("video").length,
+                    frontTrackReady: Boolean(
+                        frontUser && frontUser.videoTrack
+                        && frontUser.videoTrack.captureEnabled
+                    ),
+                    frontFramePresent:
+                        Boolean(window.lastBase64Frames && window.lastBase64Frames[1000]),
+                    frontVideoWidth: frontVideo ? frontVideo.videoWidth : 0,
+                    frontVideoHeight: frontVideo ? frontVideo.videoHeight : 0,
+                    rtcEventHistory: Array.isArray(window.rtc_event_history)
+                        ? window.rtc_event_history.slice(-20)
+                        : [],
+                  };
+                }"""
+            )
+        except NetworkError as exc:
+            self.page = None
+            self.last_error = f"diagnostics failed: {exc}"
+            result.update(
+                {
+                    "page_started": False,
+                    "last_error": self.last_error,
+                    "diagnostics_error": str(exc),
+                }
+            )
+            return result
+        result["page"] = page_state
+        return result
 
     async def initialize_browser(self):
         if self.browser and self.page:
@@ -76,8 +239,12 @@ class BrowserService:
             if self.browser and self.page:
                 return
 
+            self.last_error = None
+            self.initialization_stage = "RESOLVING_CHROME"
             executable_path = resolve_chrome_executable()
+            timeout_ms = int(STARTUP_TIMEOUT_SEC * 1000)
             try:
+                self.initialization_stage = "LAUNCHING_CHROME"
                 self.browser = await launch(
                     executablePath=executable_path,
                     headless=True,
@@ -94,21 +261,41 @@ class BrowserService:
                         f"--window-size={self.default_viewport['width']},{self.default_viewport['height']}",
                     ],
                 )
+                self.initialization_stage = "OPENING_SDK_PAGE"
                 self.page = await self.browser.newPage()
                 await self.page.setViewport(self.default_viewport)
                 await self.page.setExtraHTTPHeaders(
                     {"Accept-Language": "en-US,en;q=0.9"}
                 )
                 await self.page.goto(
-                    "http://127.0.0.1:8000/sdk", {"waitUntil": "networkidle2"}
+                    "http://127.0.0.1:8000/sdk",
+                    {"waitUntil": "domcontentloaded", "timeout": timeout_ms},
                 )
+                self.initialization_stage = "JOINING_RTC_RTM"
+                await self.page.waitForSelector("#join", {"timeout": timeout_ms})
                 await self.page.click("#join")
-                await self.page.waitForSelector("video")
-                await self.page.waitForSelector("#map")
+                await self.page.waitForFunction(
+                    "typeof window.sendMessage === 'function'",
+                    {"timeout": timeout_ms},
+                )
+                # basicRtm.js publishes sendMessage before its asynchronous
+                # Agora login and channel join complete.  Returning READY at
+                # that point races the first /control requests and produces
+                # RTM error 102 (client not logged in).
+                await self.page.waitForFunction(
+                    "window.rtm_ready === true "
+                    "&& window.rtm_channel_state === 'JOINED'",
+                    {"timeout": timeout_ms},
+                )
+                await self.page.waitForFunction(
+                    "typeof window.getLastBase64Frame === 'function'",
+                    {"timeout": timeout_ms},
+                )
+                await self.page.waitForFunction(
+                    "typeof window.initializeImageParams === 'function'",
+                    {"timeout": timeout_ms},
+                )
                 await self.page.setViewport(self.default_viewport)
-
-                await self.page.waitFor(2000)
-
                 call = f"""() => {{
                     window.initializeImageParams({{
                         imageFormat: "{FORMAT}",
@@ -116,14 +303,25 @@ class BrowserService:
                     }});
                 }}"""
                 await self.page.evaluate(call)
+                self.initialization_stage = "READY"
+            except PyppeteerTimeoutError as exc:
+                stage = self.initialization_stage
+                self.last_error = f"Timed out during {stage}"
+                await self._close_browser_unlocked(preserve_status=True)
+                raise BrowserServiceError(
+                    f"Chrome SDK bridge timed out during {stage}. Check the "
+                    "Hypercorn log, internet access, SDK token, and bot availability."
+                ) from exc
             except BrowserServiceError:
-                await self.close_browser()
+                await self._close_browser_unlocked(preserve_status=True)
                 raise
             except Exception as exc:
-                await self.close_browser()
+                stage = self.initialization_stage
+                self.last_error = f"{type(exc).__name__} during {stage}: {exc}"
+                await self._close_browser_unlocked(preserve_status=True)
                 raise BrowserServiceError(
-                    "Chrome failed to start or initialize. Set BROWSER_DUMPIO=true "
-                    "to expose the Chrome process error, then restart the SDK."
+                    f"Chrome failed during {stage}. Set BROWSER_DUMPIO=true "
+                    "to expose Chrome output, then restart the SDK."
                 ) from exc
 
     async def take_screenshot(self, video_output_folder: str, elements: list):
@@ -171,45 +369,133 @@ class BrowserService:
     async def data(self) -> dict:
         await self.initialize_browser()
 
-        bot_data = await self.page.evaluate(
-            """() => {
-        return window.rtm_data;
-        }"""
-        )
-
+        try:
+            await self.page.waitForFunction(
+                "window.rtm_data != null",
+                {"timeout": int(TELEMETRY_TIMEOUT_SEC * 1000)},
+            )
+            bot_data = await self.page.evaluate(
+                """() => {
+            return window.rtm_data;
+            }"""
+            )
+        except PyppeteerTimeoutError as exc:
+            self.initialization_stage = "READY_NO_TELEMETRY"
+            self.last_error = "RTM telemetry timeout"
+            raise BrowserServiceError(
+                "RTM telemetry did not arrive before the timeout. Confirm that "
+                "the bot is online and assigned to this SDK token/BOT_SLUG."
+            ) from exc
+        except Exception as exc:
+            self.initialization_stage = "READY_NO_TELEMETRY"
+            self.last_error = f"RTM telemetry bridge error: {type(exc).__name__}"
+            raise BrowserServiceError(
+                "RTM telemetry bridge became unavailable. Reconnect the rover "
+                "and confirm that its remote RTC/RTM user joined the channel."
+            ) from exc
+        self.initialization_stage = "READY"
+        self.last_error = None
         return bot_data
 
-    async def front(self) -> str:
+    async def front(self, timeout_sec: float | None = None) -> str:
         await self.initialize_browser()
-
-        front_frame = await self.page.evaluate(
-            """() => {
-        return getLastBase64Frame(1000) || null;
-        }"""
+        front_frame = await self._wait_for_frame(
+            1000,
+            timeout_sec=CAMERA_TIMEOUT_SEC if timeout_sec is None else timeout_sec,
         )
-
+        if not front_frame:
+            self.initialization_stage = "READY_NO_FRONT_CAMERA"
+            self.last_error = "Front camera timeout"
+            raise BrowserServiceError(
+                "Front camera did not publish a frame before the timeout. "
+                "Confirm that the bot is online and its RTC video is connected."
+            )
+        self.initialization_stage = "READY"
+        self.last_error = None
         return front_frame
 
-    async def rear(self) -> str:
+    async def rear(self, timeout_sec: float | None = None) -> str:
         await self.initialize_browser()
-
-        rear_frame = await self.page.evaluate(
-            """() => {
-        return getLastBase64Frame(1001) || null;
-        }"""
+        rear_frame = await self._wait_for_frame(
+            1001,
+            timeout_sec=CAMERA_TIMEOUT_SEC if timeout_sec is None else timeout_sec,
         )
-
+        if not rear_frame:
+            self.initialization_stage = "READY_NO_REAR_CAMERA"
+            self.last_error = "Rear camera timeout"
+            raise BrowserServiceError(
+                "Rear camera did not publish a frame before the timeout."
+            )
+        self.initialization_stage = "READY"
+        self.last_error = None
         return rear_frame
+
+    async def _wait_for_frame(
+        self,
+        uid: int,
+        timeout_sec: float = CAMERA_TIMEOUT_SEC,
+    ) -> str | None:
+        """Await the async browser frame API until a real data URL arrives."""
+
+        deadline = time.monotonic() + timeout_sec
+        while time.monotonic() < deadline:
+            try:
+                result = await self.page.evaluate(
+                    """async (uid) => {
+                      try {
+                        const frame = await window.getLastBase64Frame(uid);
+                        return typeof frame === "string" && frame.length > 0
+                          ? frame
+                          : null;
+                      } catch (error) {
+                        return null;
+                      }
+                    }""",
+                    uid,
+                )
+            except Exception as exc:
+                raise BrowserServiceError(
+                    "RTC camera bridge became unavailable. Reconnect the rover "
+                    "and confirm that its remote video user joined the channel."
+                ) from exc
+            if result:
+                return result
+            await asyncio.sleep(0.1)
+        return None
 
     async def send_message(self, message: dict):
         await self.initialize_browser()
 
-        await self.page.evaluate(
-            """(message) => {
-                window.sendMessage(message);
-            }""",
-            message,
-        )
+        try:
+            ready = await self.page.evaluate(
+                "() => window.rtm_ready === true "
+                "&& window.rtm_channel_state === 'JOINED'"
+            )
+            if not ready:
+                diagnostics = await self.diagnostics()
+                page = diagnostics.get("page", {})
+                raise BrowserServiceError(
+                    "RTM control bridge is not ready "
+                    f"(connection={page.get('rtmConnectionState')}, "
+                    f"channel={page.get('rtmChannelState')})."
+                )
+            await self.page.evaluate(
+                """async (message) => {
+                    return await window.sendMessage(message);
+                }""",
+                message,
+            )
+            return {
+                "result": "COMMAND_PUBLISHED",
+                "rtm_control_transport_ready": True,
+            }
+        except BrowserServiceError:
+            raise
+        except Exception as exc:
+            raise BrowserServiceError(
+                "RTM rejected the rover control command. Check "
+                "/connection-diagnostics and reconnect the mission bridge."
+            ) from exc
 
     async def speak(self, audio_url: str):
         await self.initialize_browser()
@@ -223,10 +509,17 @@ class BrowserService:
 
         return result
 
-    async def close_browser(self):
+    async def close_browser(self, preserve_status: bool = False):
+        async with self._initialization_lock:
+            await self._close_browser_unlocked(preserve_status=preserve_status)
+
+    async def _close_browser_unlocked(self, preserve_status: bool = False):
         if self.browser:
             try:
                 await self.browser.close()
             finally:
                 self.browser = None
                 self.page = None
+        if not preserve_status:
+            self.initialization_stage = "NOT_STARTED"
+            self.last_error = None

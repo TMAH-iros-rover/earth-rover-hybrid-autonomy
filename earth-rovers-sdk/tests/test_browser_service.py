@@ -57,7 +57,10 @@ def test_concurrent_initialization_launches_browser_once(monkeypatch) -> None:
         async def click(self, _selector):
             pass
 
-        async def waitForSelector(self, _selector):
+        async def waitForSelector(self, _selector, _options=None):
+            pass
+
+        async def waitForFunction(self, _expression, _options):
             pass
 
         async def waitFor(self, _milliseconds):
@@ -95,3 +98,98 @@ def test_concurrent_initialization_launches_browser_once(monkeypatch) -> None:
     assert launch_calls[0]["handleSIGTERM"] is False
     assert launch_calls[0]["handleSIGHUP"] is False
     assert launch_calls[0]["autoClose"] is False
+
+
+def test_wait_for_frame_awaits_async_browser_result(monkeypatch) -> None:
+    class FakePage:
+        def __init__(self):
+            self.calls = 0
+
+        async def evaluate(self, script, uid):
+            assert "await window.getLastBase64Frame(uid)" in script
+            assert uid == 1000
+            self.calls += 1
+            if self.calls < 3:
+                return None
+            return "data:image/png;base64,frame"
+
+    async def no_sleep(_delay):
+        return None
+
+    service = browser_service.BrowserService()
+    service.page = FakePage()
+    monkeypatch.setattr(browser_service.asyncio, "sleep", no_sleep)
+
+    frame = asyncio.run(service._wait_for_frame(1000))
+
+    assert frame == "data:image/png;base64,frame"
+    assert service.page.calls == 3
+
+
+def test_diagnostics_distinguish_channel_users_from_published_tracks() -> None:
+    source = Path(browser_service.__file__).read_text(encoding="utf-8")
+    rtc_source = Path("static/basicVideoCall.js").read_text(encoding="utf-8")
+
+    assert "client.remoteUsers" in source
+    assert "publishedRemoteUserCount" in source
+    assert "rtcEventHistory" in source
+    assert 'client.on("user-joined"' in rtc_source
+    assert 'client.on("user-left"' in rtc_source
+    assert 'recordRtcEvent("user-unpublished"' in rtc_source
+
+
+def test_control_send_rejects_an_unready_rtm_bridge() -> None:
+    class FakePage:
+        async def evaluate(self, script, *_args):
+            if "window.rtm_ready === true" in script:
+                return False
+            raise AssertionError("sendMessage must not run while RTM is unready")
+
+    async def fake_diagnostics():
+        return {
+            "page": {
+                "rtmConnectionState": "CONNECTING",
+                "rtmChannelState": "NOT_JOINED",
+            }
+        }
+
+    service = browser_service.BrowserService()
+    service.browser = object()
+    service.page = FakePage()
+    service.diagnostics = fake_diagnostics
+
+    with pytest.raises(browser_service.BrowserServiceError, match="not ready"):
+        asyncio.run(service.send_message({"linear": 0.0, "angular": 0.0}))
+
+
+def test_control_status_reports_rtm_transport_ready_without_recent_command() -> None:
+    class FakePage:
+        async def evaluate(self, script):
+            assert "RTM_CONTROL_TRANSPORT_READY" in script
+            return {
+                "ready": True,
+                "reason": "RTM_CONTROL_TRANSPORT_READY",
+                "rtm_connected": True,
+                "rtm_control_transport_ready": True,
+                "rtc_connected": False,
+            }
+
+    service = browser_service.BrowserService()
+    service.browser = object()
+    service.page = FakePage()
+    service.initialization_stage = "READY"
+
+    status = asyncio.run(service.control_status())
+
+    assert status["ready"] is True
+    assert status["rtm_control_transport_ready"] is True
+    assert status["reason"] == "RTM_CONTROL_TRANSPORT_READY"
+
+
+def test_control_status_reports_uninitialized_publisher() -> None:
+    service = browser_service.BrowserService()
+
+    status = asyncio.run(service.control_status())
+
+    assert status["ready"] is False
+    assert status["reason"] == "CONTROL_PUBLISHER_NOT_INITIALIZED"
