@@ -5,7 +5,10 @@ import pytest
 from earth_rover.autonomy.mission1_controller import (
     Mission1Autonomy,
     Mission1ControlConfig,
+    mission1_command_to_sdk_command,
+    mission1_to_sdk_angular,
 )
+from earth_rover.core.types import ControlCommand
 
 
 class FakeSdk:
@@ -131,10 +134,35 @@ def test_active_mission_tracks_valid_local_path():
     assert status["state"] == "DRIVING"
     assert status["command_transmitted"] is True
     assert 0.0 < sdk.commands[-1].linear <= 0.06
-    assert sdk.commands[-1].angular == pytest.approx(0.139626, rel=1e-4)
+    assert status["angular"] == pytest.approx(0.139626, rel=1e-4)
+    assert sdk.commands[-1].angular == pytest.approx(-0.139626, rel=1e-4)
 
 
-def test_controller_positive_local_path_sends_positive_right_angular():
+def test_positive_internal_angular_maps_to_negative_sdk_angular():
+    assert mission1_to_sdk_angular(0.25) == pytest.approx(-0.25)
+
+
+def test_negative_internal_angular_maps_to_positive_sdk_angular():
+    assert mission1_to_sdk_angular(-0.25) == pytest.approx(0.25)
+
+
+def test_zero_internal_angular_remains_zero_for_sdk():
+    assert mission1_to_sdk_angular(0.0) == pytest.approx(0.0)
+
+
+def test_mission1_command_to_sdk_command_preserves_linear_lamp_and_clamp_range():
+    sdk_command = mission1_command_to_sdk_command(
+        ControlCommand(0.1, 0.22, lamp=1, mode="TEST")
+    )
+
+    assert sdk_command.linear == pytest.approx(0.1)
+    assert sdk_command.angular == pytest.approx(-0.22)
+    assert -1.0 <= sdk_command.angular <= 1.0
+    assert sdk_command.lamp == 1
+    assert sdk_command.mode == "TEST"
+
+
+def test_controller_positive_local_path_sends_negative_sdk_angular_for_physical_right():
     sdk = FakeSdk(active=True)
     clock = Clock()
     autonomy = controller(
@@ -147,12 +175,17 @@ def test_controller_positive_local_path_sends_positive_right_angular():
     status = autonomy.tick()
 
     assert status["state"] == "DRIVING"
-    assert sdk.commands[-1].angular > 0.0
-    assert status["controller_debug"]["angular_convention"] == "positive_clockwise_right"
+    assert status["angular"] > 0.0
+    assert sdk.commands[-1].angular < 0.0
+    assert status["controller_debug"]["angular_convention"] == "mission1_internal_positive_clockwise_right"
     assert status["controller_debug"]["filtered_angular"] > 0.0
+    assert status["controller_debug"]["internal_angular"] > 0.0
+    assert status["controller_debug"]["sdk_angular"] < 0.0
+    assert status["controller_debug"]["internal_angular_convention"] == "positive_right"
+    assert status["controller_debug"]["sdk_angular_convention"] == "negative_right_positive_left"
 
 
-def test_controller_negative_local_path_sends_negative_left_angular():
+def test_controller_negative_local_path_sends_positive_sdk_angular_for_physical_left():
     sdk = FakeSdk(active=True)
     clock = Clock()
     autonomy = controller(
@@ -165,8 +198,10 @@ def test_controller_negative_local_path_sends_negative_left_angular():
     status = autonomy.tick()
 
     assert status["state"] == "DRIVING"
-    assert sdk.commands[-1].angular < 0.0
+    assert status["angular"] < 0.0
+    assert sdk.commands[-1].angular > 0.0
     assert status["controller_debug"]["filtered_angular"] < 0.0
+    assert status["controller_debug"]["sdk_angular"] > 0.0
 
 
 def test_control_send_failure_enters_cooldown_without_command_spam():
@@ -276,7 +311,8 @@ def test_goal_behind_rotates_instead_of_stopping_on_invalid_forward_path():
     assert status["state"] == "ROTATING_TO_GOAL"
     assert status["command_transmitted"] is True
     assert sdk.commands[-1].linear == 0.0
-    assert sdk.commands[-1].angular < 0.0
+    assert status["angular"] < 0.0
+    assert sdk.commands[-1].angular > 0.0
     assert status["target_sequence"] == 1
 
 

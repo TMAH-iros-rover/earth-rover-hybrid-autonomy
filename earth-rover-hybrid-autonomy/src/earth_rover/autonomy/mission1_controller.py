@@ -12,6 +12,29 @@ from earth_rover.control.command_filter import CommandFilter
 from earth_rover.core.types import ControlCommand
 
 
+def mission1_to_sdk_angular(angular_right_positive: float) -> float:
+    """Convert Mission1 right-positive angular to Earth Rover SDK angular.
+
+    Mission1 internal planning/control uses positive angular for physical
+    right/clockwise turns.  The live Earth Rover SDK command transport observed
+    on the rover uses the opposite sign: negative angular turns right and
+    positive angular turns left.  Keep the sign inversion at this adapter
+    boundary so planner geometry, filtering, and status remain in the internal
+    convention.
+    """
+
+    return -float(angular_right_positive)
+
+
+def mission1_command_to_sdk_command(command: ControlCommand) -> ControlCommand:
+    return ControlCommand(
+        linear=float(command.linear),
+        angular=mission1_to_sdk_angular(command.angular),
+        lamp=int(command.lamp),
+        mode=command.mode,
+    )
+
+
 class MissionSdk(Protocol):
     def get_mission_status(self) -> dict[str, Any]: ...
     def send_control(self, command: ControlCommand) -> bool: ...
@@ -593,9 +616,13 @@ class Mission1Autonomy:
             "navigation_heading_error_convention": "positive_clockwise_right",
             "desired_angular": float(raw.angular),
             "filtered_angular": float(filtered.angular),
-            "angular_convention": "positive_clockwise_right",
+            "internal_angular": float(filtered.angular),
+            "internal_angular_convention": "positive_right",
+            "sdk_angular": mission1_to_sdk_angular(filtered.angular),
+            "sdk_angular_convention": "negative_right_positive_left",
+            "angular_convention": "mission1_internal_positive_clockwise_right",
             "sdk_angular_convention_source": (
-                "earth-rovers-sdk examples/README.md: angular -1 full left, +1 full right"
+                "live rover test: SDK angular < 0 turns right, SDK angular > 0 turns left"
             ),
             "linear_raw": float(raw.linear),
             "linear_filtered": float(filtered.linear),
@@ -666,8 +693,9 @@ class Mission1Autonomy:
         return self.live_control_enabled and self._mission_was_active
 
     def _try_send_control(self, command: ControlCommand, now_mono: float) -> bool:
+        sdk_command = mission1_command_to_sdk_command(command)
         try:
-            self.sdk.send_control(command)
+            self.sdk.send_control(sdk_command)
         except Exception as exc:
             self._last_control_error = f"{type(exc).__name__}: {exc}"
             self._control_error_cooldown_until = (

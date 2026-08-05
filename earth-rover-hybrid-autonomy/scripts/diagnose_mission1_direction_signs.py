@@ -9,6 +9,7 @@ import numpy as np
 from earth_rover.control.command_filter import CommandFilter
 from earth_rover.core.types import ControlCommand
 from earth_rover.navigation.gps_utils import normalize_angle_deg
+from earth_rover.autonomy.mission1_controller import mission1_to_sdk_angular
 from earth_rover.planning.motion_primitive_planner import (
     MotionPrimitivePlanner,
     MotionPrimitivePlannerConfig,
@@ -19,9 +20,8 @@ from earth_rover.planning.motion_primitive_planner import (
 
 
 SDK_CONVENTION_SOURCE = [
-    "../earth-rovers-sdk/examples/README.md: angular -1.0 full left to +1.0 full right",
-    "../earth-rovers-sdk/examples/basics/09_keyboard_teleop.py: left -> negative angular, right -> positive angular",
-    "../earth-rovers-sdk/examples/basics/02_diagonal_movement.py: forward-left -0.3, forward-right +0.3",
+    "live rover test: SDK angular < 0 turns physical RIGHT and increases rover heading",
+    "live rover test: SDK angular > 0 turns physical LEFT and decreases rover heading",
 ]
 
 
@@ -41,10 +41,18 @@ def direction_from_signed_angle(angle_deg: float, *, deadband_deg: float = 1.0) 
     return "CENTER"
 
 
-def sdk_direction_from_angular(angular: float, *, deadband: float = 1e-6) -> str:
+def internal_direction_from_angular(angular: float, *, deadband: float = 1e-6) -> str:
     if angular > deadband:
         return "RIGHT"
     if angular < -deadband:
+        return "LEFT"
+    return "CENTER"
+
+
+def sdk_physical_direction_from_angular(angular: float, *, deadband: float = 1e-6) -> str:
+    if angular < -deadband:
+        return "RIGHT"
+    if angular > deadband:
         return "LEFT"
     return "CENTER"
 
@@ -97,11 +105,13 @@ def run_case(case: Case) -> bool:
             }
         }
     ).apply(raw, 1.0, frame_is_stale=False, data_is_stale=False)
+    sdk_angular = mission1_to_sdk_angular(filtered.angular)
     result = {
         "navigation": direction_from_signed_angle(nav_error),
         "planner": direction_from_signed_angle(selected.heading_deg),
         "image": path_direction,
-        "command": sdk_direction_from_angular(filtered.angular),
+        "internal_command": internal_direction_from_angular(filtered.angular),
+        "sdk_command": sdk_physical_direction_from_angular(sdk_angular),
     }
     passed = all(value == case.expected_physical for value in result.values())
     print(f"CASE: {case.name}")
@@ -111,8 +121,9 @@ def run_case(case: Case) -> bool:
     print(f"Navigation error:         {nav_error:+.1f} deg = {result['navigation']}")
     print(f"Selected candidate:       {selected.heading_deg:+.1f} deg = {result['planner']}")
     print(f"Candidate endpoint offset:{offset:+d} px = {result['image']}")
-    print(f"Desired angular:          {raw.angular:+.3f} = {sdk_direction_from_angular(raw.angular)}")
-    print(f"Filtered angular:         {filtered.angular:+.3f} = {result['command']}")
+    print(f"Internal raw angular:     {raw.angular:+.3f} = {internal_direction_from_angular(raw.angular)}")
+    print(f"Internal filtered angular:{filtered.angular:+.3f} = {result['internal_command']}")
+    print(f"SDK transmitted angular:  {sdk_angular:+.3f} = {result['sdk_command']}")
     print(f"RESULT: {'PASS' if passed else 'FAIL'}")
     if not passed:
         for stage, value in result.items():
@@ -158,13 +169,14 @@ def print_sdk_manual_convention() -> None:
     print("SDK MANUAL CONTROL CONVENTION EVIDENCE")
     for line in SDK_CONVENTION_SOURCE:
         print(f"- {line}")
-    print("Conclusion used by this diagnostic: SDK angular negative=LEFT, positive=RIGHT.")
+    print("Conclusion used by this diagnostic: SDK angular negative=RIGHT, positive=LEFT.")
     print()
 
 
 def main() -> int:
     print("Mission1 direction sign diagnostic")
-    print("Canonical runtime convention: positive angle/angular = clockwise physical RIGHT.")
+    print("Mission1 internal convention: positive angle/angular = clockwise physical RIGHT.")
+    print("Earth Rover SDK command convention: negative angular = physical RIGHT.")
     print()
     print_candidate_geometry()
     print_overlay_arrow_formula()
