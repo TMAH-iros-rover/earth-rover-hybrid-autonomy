@@ -8,6 +8,8 @@ datasets/*
 !datasets/.gitkeep
 !logs/.gitkeep
 
+checkpoints/
+
 .env
 .env.*
 !.env.example

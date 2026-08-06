@@ -172,3 +172,69 @@ def test_heading_rate_guard_is_disabled_by_default() -> None:
 def test_switch_radius_must_be_positive(radius: float) -> None:
     with pytest.raises(ValueError, match="switch_radius_m"):
         CheckpointRoutePlanner(CHECKPOINTS, switch_radius_m=radius)
+
+
+def test_rejects_a_gps_fix_that_implies_an_impossible_ground_speed() -> None:
+    # Regression: a live run's reported (lat, lon) teleported by tens of
+    # meters for a single sample (multipath/urban canyon) and then jumped
+    # back, which fed straight into target_bearing_deg/distance_to_target_m
+    # every call since neither is smoothed on the position itself.
+    checkpoints = [{"sequence": 1, "latitude": 1.0, "longitude": 0.0}]
+    clock = [0.0]
+    planner = CheckpointRoutePlanner(
+        checkpoints,
+        switch_radius_m=1.0,
+        max_gps_jump_speed_mps=5.0,
+        monotonic=lambda: clock[0],
+    )
+
+    first = planner.update(0.0, 0.0, heading_deg=0.0)
+    clock[0] += 0.5
+    # ~0.001 deg latitude is roughly 111m; over 0.5s that implies ~222 m/s.
+    spiked = planner.update(0.001, 0.0, heading_deg=0.0)
+
+    assert first.route_polyline[0] == (0.0, 0.0)
+    assert spiked.route_polyline[0] == (0.0, 0.0)
+
+
+def test_accepts_a_sustained_gps_move_even_if_it_starts_fast() -> None:
+    checkpoints = [{"sequence": 1, "latitude": 1.0, "longitude": 0.0}]
+    clock = [0.0]
+    planner = CheckpointRoutePlanner(
+        checkpoints,
+        switch_radius_m=1.0,
+        max_gps_jump_speed_mps=5.0,
+        monotonic=lambda: clock[0],
+    )
+
+    planner.update(0.0, 0.0, heading_deg=0.0)
+    clock[0] += 0.5
+    rejected = planner.update(0.001, 0.0, heading_deg=0.0)
+    # The same new fix keeps being reported; growing dt against the still
+    # -unmoved reference eventually makes the implied speed plausible again
+    # instead of rejecting a real (if fast) move forever.
+    clock[0] += 30.0
+    accepted = planner.update(0.001, 0.0, heading_deg=0.0)
+
+    assert rejected.route_polyline[0] == (0.0, 0.0)
+    assert accepted.route_polyline[0] == (0.001, 0.0)
+
+
+def test_gps_jump_speed_guard_is_disabled_by_default() -> None:
+    checkpoints = [{"sequence": 1, "latitude": 1.0, "longitude": 0.0}]
+    clock = [0.0]
+    planner = CheckpointRoutePlanner(
+        checkpoints, switch_radius_m=1.0, monotonic=lambda: clock[0]
+    )
+
+    planner.update(0.0, 0.0, heading_deg=0.0)
+    clock[0] += 0.5
+    spiked = planner.update(0.001, 0.0, heading_deg=0.0)
+
+    assert spiked.route_polyline[0] == (0.001, 0.0)
+
+
+@pytest.mark.parametrize("speed", [0.0, -1.0, float("nan")])
+def test_max_gps_jump_speed_must_be_positive(speed: float) -> None:
+    with pytest.raises(ValueError, match="max_gps_jump_speed_mps"):
+        CheckpointRoutePlanner(CHECKPOINTS, switch_radius_m=1.0, max_gps_jump_speed_mps=speed)

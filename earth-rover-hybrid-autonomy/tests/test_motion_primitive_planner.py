@@ -8,8 +8,12 @@ import pytest
 from earth_rover.planning.motion_primitive_planner import (
     MotionPrimitivePlanner,
     MotionPrimitivePlannerConfig,
+    adaptive_kmeans_paths,
+    genie_candidate_points,
     image_direction_from_x_offset,
+    merge_close_path_clusters,
     normalize_angle_deg,
+    path_heading_from_endpoint_deg,
     primitive_curve_points,
     selected_candidate_endpoint_x_offset_px,
 )
@@ -221,3 +225,116 @@ def test_candidate_score_ema_smooths_raw_score_changes() -> None:
 def test_angle_wraparound_uses_short_direction() -> None:
     assert normalize_angle_deg(-179.0 - 179.0) == pytest.approx(2.0)
     assert normalize_angle_deg(179.0 - -179.0) == pytest.approx(-2.0)
+
+
+# --------------------------------------------------------------------------
+# genie_cluster mode: GeNIE Algorithm 1 (sample -> top-K -> cluster -> merge
+# -> angular selection) ported to image space.
+# --------------------------------------------------------------------------
+
+
+def genie_planner(clock: Clock, **overrides) -> MotionPrimitivePlanner:
+    values = {
+        "mode": "genie_cluster",
+        "min_candidate_commit_sec": 0.1,
+        "switch_confirm_count": 2,
+        "genie_switch_heading_deadband_deg": 6.0,
+        "transient_invalid_grace_sec": 0.8,
+        "max_plan_age_sec": 1.5,
+    } | overrides
+    config = MotionPrimitivePlannerConfig(**values)
+    return MotionPrimitivePlanner(config, monotonic=clock)
+
+
+def test_path_heading_from_endpoint_deg_inverts_genie_candidate_points() -> None:
+    shape = (120, 160)
+    for heading in (-40.0, -10.0, 0.0, 17.5, 45.0):
+        points = genie_candidate_points(
+            shape, heading, maximum_visual_heading_deg=55.0, n_waypoints=10
+        )
+        recovered = path_heading_from_endpoint_deg(
+            points, width=shape[1], maximum_visual_heading_deg=55.0
+        )
+        assert recovered == pytest.approx(heading, abs=1e-6)
+
+
+def test_adaptive_kmeans_paths_separates_two_distinct_directions() -> None:
+    shape = (120, 160)
+    left_paths = np.stack(
+        [genie_candidate_points(shape, -30.0, maximum_visual_heading_deg=55.0, n_waypoints=8)] * 3
+    )
+    right_paths = np.stack(
+        [genie_candidate_points(shape, 30.0, maximum_visual_heading_deg=55.0, n_waypoints=8)] * 3
+    )
+    paths = np.concatenate([left_paths, right_paths], axis=0)
+
+    labels, centers = adaptive_kmeans_paths(paths, k_max=4, seed=0)
+
+    assert len(np.unique(labels)) == 2
+    assert labels[0] == labels[1] == labels[2]
+    assert labels[3] == labels[4] == labels[5]
+    assert labels[0] != labels[3]
+    assert len(centers) == 2
+
+
+def test_merge_close_path_clusters_unions_within_threshold() -> None:
+    shape = (120, 160)
+    near_zero = genie_candidate_points(shape, 0.0, maximum_visual_heading_deg=55.0, n_waypoints=8)
+    near_two = genie_candidate_points(shape, 2.0, maximum_visual_heading_deg=55.0, n_waypoints=8)
+    far_right = genie_candidate_points(shape, 45.0, maximum_visual_heading_deg=55.0, n_waypoints=8)
+    centers = np.stack([near_zero, near_two, far_right])
+
+    merged = merge_close_path_clusters(centers, threshold_px=5.0)
+
+    assert len(merged) == 2
+
+
+def test_genie_cluster_selects_straight_when_goal_and_score_prefer_straight() -> None:
+    clock = Clock()
+    local = genie_planner(clock)
+    score, valid = score_map_for_heading(0.0)
+
+    plan = local.plan(score, valid, target_heading_error_rad=0.0)
+
+    assert plan.path_valid is True
+    assert plan.selected_candidate is not None
+    assert plan.selected_candidate.heading_deg == pytest.approx(0.0, abs=3.0)
+    assert plan.image_path.reason == "MOTION_PRIMITIVE_SELECTED"
+
+
+def test_genie_cluster_switches_toward_goal_only_after_confirmation() -> None:
+    clock = Clock()
+    local = genie_planner(clock)
+    straight, valid = score_map_for_heading(0.0)
+    local.plan(straight, valid, target_heading_error_rad=0.0)
+
+    clock.value += 1.0
+    right, valid = score_map_for_heading(30.0)
+    pending = local.plan(right, valid, target_heading_error_rad=math.radians(30.0))
+    assert pending.selected_candidate.heading_deg == pytest.approx(0.0, abs=3.0)
+    assert pending.switch_reason == "switch_pending"
+
+    clock.value += 0.5
+    switched = local.plan(right, valid, target_heading_error_rad=math.radians(30.0))
+    assert switched.candidate_switched is True
+    assert switched.selected_candidate.heading_deg > 15.0
+
+
+def test_genie_cluster_all_near_field_unsafe_returns_blocked_plan() -> None:
+    clock = Clock()
+    local = genie_planner(clock)
+    score = np.zeros((120, 160), dtype=np.float32)
+    valid = np.ones_like(score, dtype=bool)
+
+    plan = local.plan(score, valid, target_heading_error_rad=0.0)
+
+    assert plan.near_field_safe is False
+    assert plan.path_valid is False
+    assert plan.image_path.reason == "MOTION_PRIMITIVE_NEAR_FIELD_UNSAFE"
+
+
+def test_genie_cluster_config_rejects_invalid_tuning() -> None:
+    with pytest.raises(ValueError, match="genie_top_k"):
+        MotionPrimitivePlannerConfig(mode="genie_cluster", genie_top_k=0).validate()
+    with pytest.raises(ValueError, match="genie_n_candidates"):
+        MotionPrimitivePlannerConfig(mode="genie_cluster", genie_n_candidates=1).validate()

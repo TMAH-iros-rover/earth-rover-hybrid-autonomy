@@ -5,7 +5,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from earth_rover.navigation.gps_utils import bearing_deg, normalize_angle_deg
+from earth_rover.navigation.gps_utils import bearing_deg, haversine_distance_m, normalize_angle_deg
 from earth_rover.navigation.waypoint_manager import WaypointManager
 from earth_rover.utils.math_utils import safe_float
 
@@ -52,6 +52,7 @@ class CheckpointRoutePlanner:
         target_heading_deadband_deg: float = 0.0,
         large_heading_change_deg: float = 180.0,
         max_heading_rate_deg_per_sec: float | None = None,
+        max_gps_jump_speed_mps: float | None = None,
         monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         radius = _finite(switch_radius_m)
@@ -67,6 +68,10 @@ class CheckpointRoutePlanner:
             not math.isfinite(max_heading_rate_deg_per_sec) or max_heading_rate_deg_per_sec <= 0.0
         ):
             raise ValueError("max_heading_rate_deg_per_sec must be finite and positive")
+        if max_gps_jump_speed_mps is not None and (
+            not math.isfinite(max_gps_jump_speed_mps) or max_gps_jump_speed_mps <= 0.0
+        ):
+            raise ValueError("max_gps_jump_speed_mps must be finite and positive")
         self._waypoints = WaypointManager(
             checkpoints,
             radius,
@@ -80,11 +85,17 @@ class CheckpointRoutePlanner:
             if max_heading_rate_deg_per_sec is None
             else float(max_heading_rate_deg_per_sec)
         )
+        self._max_gps_jump_speed_mps = (
+            None if max_gps_jump_speed_mps is None else float(max_gps_jump_speed_mps)
+        )
         self._monotonic = monotonic
         self._filtered_heading_error_deg: float | None = None
         self._filtered_target_sequence: int | None = None
         self._last_accepted_heading_deg: float | None = None
         self._last_accepted_heading_monotonic: float | None = None
+        self._last_accepted_lat: float | None = None
+        self._last_accepted_lon: float | None = None
+        self._last_accepted_position_monotonic: float | None = None
 
     def update(
         self,
@@ -92,8 +103,7 @@ class CheckpointRoutePlanner:
         longitude: object,
         heading_deg: object,
     ) -> GlobalRouteState:
-        lat = _latitude(latitude)
-        lon = _longitude(longitude)
+        lat, lon = self._sanitize_position(_latitude(latitude), _longitude(longitude))
         heading = self._sanitize_heading(_heading(heading_deg))
         target = self._waypoints.current_target()
 
@@ -187,6 +197,57 @@ class CheckpointRoutePlanner:
         self._waypoints.mark_current_reported()
         self._filtered_heading_error_deg = None
         self._filtered_target_sequence = None
+
+    def _sanitize_position(
+        self,
+        lat: float | None,
+        lon: float | None,
+    ) -> tuple[float | None, float | None]:
+        """Reject a GPS fix that implies an impossible ground speed.
+
+        Cheap outdoor GPS occasionally teleports the reported fix by tens of
+        meters for one sample (multipath/urban canyon/satellite reacquire)
+        and then jumps back. Unlike the heading filter's deadband/alpha
+        smoothing, that single-sample teleport still lands directly in
+        target_bearing_deg/distance_to_target_m (both computed fresh from
+        lat/lon every call, with no smoothing of the position itself), so it
+        would otherwise pass straight through as a bogus goal direction.
+        Mirrors _sanitize_heading: hold the last accepted fix instead of
+        accepting a jump whose implied speed exceeds what this rover can
+        physically do, and do not advance the reference timestamp while
+        rejecting, so a real (if fast) sustained move is not blocked forever.
+        """
+
+        if lat is None or lon is None or self._max_gps_jump_speed_mps is None:
+            if lat is not None and lon is not None:
+                self._last_accepted_lat = lat
+                self._last_accepted_lon = lon
+                self._last_accepted_position_monotonic = self._monotonic()
+            return lat, lon
+        now = self._monotonic()
+        if (
+            self._last_accepted_lat is None
+            or self._last_accepted_lon is None
+            or self._last_accepted_position_monotonic is None
+        ):
+            self._last_accepted_lat = lat
+            self._last_accepted_lon = lon
+            self._last_accepted_position_monotonic = now
+            return lat, lon
+        dt = max(1e-3, now - self._last_accepted_position_monotonic)
+        implied_speed = (
+            haversine_distance_m(self._last_accepted_lat, self._last_accepted_lon, lat, lon) / dt
+        )
+        if implied_speed > self._max_gps_jump_speed_mps:
+            # Same anti-lockout reasoning as _sanitize_heading: do not touch
+            # the reference timestamp here, so a persistently-repeated new
+            # fix eventually gets accepted via a growing dt instead of being
+            # rejected forever.
+            return self._last_accepted_lat, self._last_accepted_lon
+        self._last_accepted_lat = lat
+        self._last_accepted_lon = lon
+        self._last_accepted_position_monotonic = now
+        return lat, lon
 
     def _sanitize_heading(self, heading: float | None) -> float | None:
         """Reject a heading reading that implies an impossible turn rate.
