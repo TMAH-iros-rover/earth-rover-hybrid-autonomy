@@ -11,6 +11,7 @@ import cv2
 import numpy as np
 
 from earth_rover.core.types import FrameData, RoverData
+from earth_rover.navigation.localization import GpsHeadingEkf
 from earth_rover.navigation.checkpoint_route import (
     CheckpointRoutePlanner,
     GlobalRouteState,
@@ -73,6 +74,7 @@ def run_shadow_step(
     route_planner: CheckpointRoutePlanner | None = None,
     local_planner: MotionPrimitivePlanner | None = None,
     heading_offset_deg: float = 0.0,
+    localizer: GpsHeadingEkf | None = None,
 ) -> tuple[ShadowStep, RoverData | None]:
     """Fetch one live frame, infer once, and return a read-only dashboard step.
 
@@ -91,6 +93,20 @@ def run_shadow_step(
             telemetry = sdk.get_data()
         except Exception as exc:
             telemetry_error = f"{type(exc).__name__}: {exc}"
+        else:
+            # Gated on fetch_telemetry -- fusing the same stale telemetry
+            # sample on every outer-loop tick would make the filter
+            # overconfident in stale data and more resistant to genuinely
+            # new fixes, the opposite of what it's for.
+            if localizer is not None:
+                raw_payload = telemetry.raw if isinstance(telemetry.raw, dict) else {}
+                localizer.observe_gyro(raw_payload.get("gyros"))
+                localizer.observe_gps_heading(
+                    telemetry.latitude,
+                    telemetry.longitude,
+                    corrected_heading_deg(telemetry.orientation, heading_offset_deg),
+                    telemetry.gps_signal,
+                )
     if frame.image.ndim != 3 or frame.image.shape[2] != 3:
         raise ValueError("SDK front frame must be an HxWx3 BGR image")
     if frame.image.dtype != np.uint8:
@@ -98,12 +114,16 @@ def run_shadow_step(
 
     image_bgr = np.asarray(frame.image)
     image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
+    if localizer is not None and localizer.is_locked:
+        fused_lat, fused_lon, fused_heading_deg = localizer.current_estimate()
+    elif telemetry is not None:
+        fused_lat = telemetry.latitude
+        fused_lon = telemetry.longitude
+        fused_heading_deg = corrected_heading_deg(telemetry.orientation, heading_offset_deg)
+    else:
+        fused_lat = fused_lon = fused_heading_deg = None
     navigation = (
-        route_planner.update(
-            telemetry.latitude,
-            telemetry.longitude,
-            corrected_heading_deg(telemetry.orientation, heading_offset_deg),
-        )
+        route_planner.update(fused_lat, fused_lon, fused_heading_deg)
         if route_planner is not None and telemetry is not None
         else None
     )
@@ -267,9 +287,10 @@ def run_shadow_step(
         "telemetry_valid": telemetry_error is None and not telemetry_stale,
         "shadow_state": shadow_state,
         "checkpoint_sha256": checkpoint_sha256,
-        "telemetry": telemetry_record(telemetry),
+        "telemetry": telemetry_record(telemetry, fresh=fetch_telemetry),
         "navigation_heading_offset_deg": heading_offset_deg,
         "navigation": navigation_record(navigation),
+        "localization": localization_record(localizer),
         "sdk_allowed_read_endpoints": [
             "/v2/front",
             "/front",
@@ -334,9 +355,17 @@ def compose_traversability_overlay(
     return overlay
 
 
-def telemetry_record(data: RoverData | None) -> dict[str, object] | None:
+def telemetry_record(
+    data: RoverData | None, *, fresh: bool = True
+) -> dict[str, object] | None:
     if data is None:
         return None
+    raw = data.raw if isinstance(data.raw, dict) else {}
+    # accels/gyros/mags/vibration are only present in `raw` for logging (not
+    # consumed anywhere -- units/axes undocumented, see localization.py).
+    # `data` itself is reused unchanged across every outer-loop tick between
+    # telemetry refetches, so without `fresh` these (comparatively large)
+    # arrays would be re-serialized into every JSONL line redundantly.
     return {
         "local_timestamp": data.timestamp,
         "sdk_timestamp": data.sdk_timestamp,
@@ -348,6 +377,10 @@ def telemetry_record(data: RoverData | None) -> dict[str, object] | None:
         "battery": data.battery,
         "signal_level": data.signal_level,
         "gps_signal": data.gps_signal,
+        "accels": raw.get("accels") if fresh else None,
+        "gyros": raw.get("gyros") if fresh else None,
+        "mags": raw.get("mags") if fresh else None,
+        "vibration": raw.get("vibration") if fresh else None,
     }
 
 
@@ -375,6 +408,19 @@ def corrected_heading_deg(
     if not math.isfinite(heading) or not math.isfinite(offset):
         return None
     return (heading + offset) % 360.0
+
+
+def localization_record(localizer: GpsHeadingEkf | None) -> dict[str, object] | None:
+    if localizer is None:
+        return None
+    lat, lon, heading_deg = localizer.current_estimate()
+    return {
+        "locked": localizer.is_locked,
+        "fused_latitude": lat,
+        "fused_longitude": lon,
+        "fused_heading_deg": heading_deg,
+        "gyro_trusted": localizer.gyro_trusted,
+    }
 
 
 def navigation_record(state: GlobalRouteState | None) -> dict[str, object] | None:

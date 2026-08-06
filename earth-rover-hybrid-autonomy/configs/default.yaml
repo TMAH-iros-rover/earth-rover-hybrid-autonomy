@@ -77,6 +77,53 @@ navigation:
   # to null to disable.
   max_heading_rate_deg_per_sec: 120.0
 
+localization:
+  # Fuses raw GPS + the pre-fused `orientation` heading (+ gyro yaw rate)
+  # into a stable position/heading estimate before it reaches
+  # CheckpointRoutePlanner, instead of feeding it raw jittery telemetry.
+  # See src/earth_rover/navigation/localization.py:GpsHeadingEkf.
+  enabled: true
+
+  # Local ENU origin is locked to the average of this many consecutive
+  # valid GPS fixes (a single fix is exactly as jitter-prone as any other).
+  origin_lock_fix_count: 3
+
+  # Position process noise: a human estimate of how fast this rover can
+  # plausibly move, NOT derived from control.linear_max/mission1_autonomy.
+  # max_linear -- those are normalized [-1, 1] command duty-cycle values,
+  # not m/s (there is no confirmed conversion between the two anywhere in
+  # this codebase; conflating them was caught and corrected during design).
+  max_linear_speed_mps: 0.5
+  process_noise_position_scale: 1.0
+
+  # GPS measurement trust. gps_signal's scale/direction is undocumented
+  # (sdk_client.py falls back through "signal" or "quality", which have
+  # opposite monotonicity if taken literally), so mapping it to accuracy is
+  # opt-in and off by default -- a fixed default_gps_accuracy_m is used
+  # unless explicitly enabled and calibrated.
+  default_gps_accuracy_m: 3.0
+  use_gps_signal_for_accuracy: false
+  gps_signal_accuracy_floor_m: 1.0
+  gps_signal_accuracy_ceiling_m: 15.0
+  gps_signal_min: 0.0
+  gps_signal_max: 100.0
+  gps_signal_higher_is_better: true
+
+  # Heading measurement noise (the SDK's `orientation` field).
+  heading_measurement_std_deg: 8.0
+
+  # Gyro yaw axis/sign/scale: unverified assumptions (gyros[x,y,z,timestamp]
+  # has no documented units). Defaults assume raw units are already deg/s.
+  # If these assumptions are wrong, the gyro-disagreement safety net below
+  # detects it and disables gyro fusion for the rest of the run rather than
+  # letting a bad assumption actively fight real motion.
+  gyro_yaw_axis_index: 2
+  gyro_yaw_sign: 1.0
+  gyro_scale_rad_per_sec_per_unit: 0.017453292519943295  # pi/180, assumes deg/s
+  gyro_bias_process_noise: 1.0e-5
+  gyro_disagreement_window: 20
+  gyro_disagreement_threshold: 0.5
+
 planner:
   mode: motion_primitives
   # Finer steps near center let the planner express a small correction

@@ -19,6 +19,7 @@ for import_root in (ROOT, ROOT / "src"):
 
 from earth_rover.sdk_client import EarthRoverSDKClient  # noqa: E402
 from earth_rover.navigation.checkpoint_route import CheckpointRoutePlanner  # noqa: E402
+from earth_rover.navigation.localization import GpsHeadingEkf  # noqa: E402
 from earth_rover.planning.trajectory_sampler import (  # noqa: E402
     DEFAULT_CURVATURES,
     ConstantCurvatureTrajectorySampler,
@@ -169,6 +170,22 @@ def main(argv: list[str] | None = None) -> int:
     )
     local_planner = MotionPrimitivePlanner(planner_cfg)
 
+    # Reuse navigation.max_heading_rate_deg_per_sec (already tuned, already
+    # physical-units) for the filter's heading process noise instead of a
+    # second independently-tuned bound; localization.yaml can still override
+    # it explicitly if ever needed.
+    localization_cfg = dict(config.get("localization", {}))
+    localization_cfg.setdefault(
+        "max_heading_rate_deg_per_sec",
+        navigation_cfg.get("max_heading_rate_deg_per_sec", 120.0),
+    )
+    # Constructed once, outside the route-refresh block below -- the fused
+    # position/heading estimate must not reset just because the checkpoint
+    # route reloaded.
+    localizer = (
+        GpsHeadingEkf(localization_cfg) if localization_cfg.get("enabled", True) else None
+    )
+
     output.mkdir(parents=True)
     jsonl_path = output / "shadow_frames.jsonl"
     records: list[dict[str, object]] = []
@@ -263,6 +280,7 @@ def main(argv: list[str] | None = None) -> int:
                         route_planner=route_planner,
                         local_planner=local_planner,
                         heading_offset_deg=heading_offset_deg,
+                        localizer=localizer,
                     )
                     if fetch_telemetry:
                         telemetry_backoff = (

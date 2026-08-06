@@ -75,6 +75,32 @@ class RecordingPredictor:
         )
 
 
+class SpyLocalizer:
+    """Minimal stand-in for GpsHeadingEkf's interface, for wiring tests."""
+
+    def __init__(self, locked_estimate=None) -> None:
+        self.gyro_calls: list[object] = []
+        self.observe_calls: list[tuple] = []
+        self._locked_estimate = locked_estimate
+
+    def observe_gyro(self, raw_samples) -> None:
+        self.gyro_calls.append(raw_samples)
+
+    def observe_gps_heading(self, latitude, longitude, heading_deg, gps_signal=None) -> None:
+        self.observe_calls.append((latitude, longitude, heading_deg, gps_signal))
+
+    @property
+    def is_locked(self) -> bool:
+        return self._locked_estimate is not None
+
+    def current_estimate(self):
+        return self._locked_estimate if self._locked_estimate is not None else (None, None, None)
+
+    @property
+    def gyro_trusted(self) -> bool:
+        return True
+
+
 class TelemetryFailingSdk(ReadOnlyFakeSdk):
     def get_data(self) -> RoverData:
         self.calls.append("get_data")
@@ -277,6 +303,150 @@ def test_shadow_step_applies_live_rover_heading_offset_for_route_guidance() -> N
     assert navigation["current_heading_deg"] == pytest.approx(347.0)
     assert abs(navigation["heading_error_deg"]) < 15.0
     assert step.record["navigation_heading_offset_deg"] == 180.0
+
+
+def test_shadow_step_feeds_fresh_telemetry_into_localizer_when_fetching() -> None:
+    sdk = ReadOnlyFakeSdk()
+    localizer = SpyLocalizer()
+    clock_values = iter((100.0, 100.01, 100.1))
+    monotonic_values = iter((10.01, 10.03, 10.2))
+
+    run_shadow_step(
+        sdk,
+        RecordingPredictor(),
+        frame_index=0,
+        telemetry=None,
+        fetch_telemetry=True,
+        started_monotonic=10.0,
+        checkpoint_sha256="abc",
+        maximum_frame_age_sec=1.0,
+        maximum_telemetry_age_sec=1.0,
+        clock=lambda: next(clock_values),
+        monotonic=lambda: next(monotonic_values),
+        panel_width=100,
+        localizer=localizer,
+    )
+
+    # ReadOnlyFakeSdk.get_data() returns latitude=1.0, longitude=2.0,
+    # orientation=3.0, gps_signal=20.0, raw={} (no gyros key).
+    assert localizer.observe_calls == [(1.0, 2.0, 3.0, 20.0)]
+    assert localizer.gyro_calls == [None]
+
+
+def test_shadow_step_does_not_refuse_localizer_when_telemetry_not_refetched() -> None:
+    sdk = ReadOnlyFakeSdk()
+    localizer = SpyLocalizer()
+    stale_telemetry = sdk.get_data()
+    sdk.calls.clear()
+    clock_values = iter((100.0, 100.01, 100.1))
+    monotonic_values = iter((10.01, 10.03, 10.2))
+
+    run_shadow_step(
+        sdk,
+        RecordingPredictor(),
+        frame_index=0,
+        telemetry=stale_telemetry,
+        fetch_telemetry=False,
+        started_monotonic=10.0,
+        checkpoint_sha256="abc",
+        maximum_frame_age_sec=1.0,
+        maximum_telemetry_age_sec=1.0,
+        clock=lambda: next(clock_values),
+        monotonic=lambda: next(monotonic_values),
+        panel_width=100,
+        localizer=localizer,
+    )
+
+    # Re-fusing the same telemetry sample every tick would make the filter
+    # overconfident in stale data -- must only fuse on a fresh fetch.
+    assert sdk.calls == ["get_front_frame"]
+    assert localizer.observe_calls == []
+    assert localizer.gyro_calls == []
+
+
+def test_telemetry_record_only_includes_raw_imu_arrays_when_fresh() -> None:
+    sdk = ReadOnlyFakeSdk()
+    telemetry_with_gyros = RoverData(
+        **{**sdk.get_data().__dict__, "raw": {"gyros": [[0.0, 0.0, 1.0, 5.0]]}}
+    )
+    sdk.get_data = lambda: telemetry_with_gyros
+    clock_values = iter((100.0, 100.01, 100.1, 100.0, 100.01, 100.1))
+    monotonic_values = iter((10.01, 10.03, 10.2, 10.4, 10.42, 10.6))
+
+    fresh_step, _ = run_shadow_step(
+        sdk,
+        RecordingPredictor(),
+        frame_index=0,
+        telemetry=None,
+        fetch_telemetry=True,
+        started_monotonic=10.0,
+        checkpoint_sha256="abc",
+        maximum_frame_age_sec=1.0,
+        maximum_telemetry_age_sec=1.0,
+        clock=lambda: next(clock_values),
+        monotonic=lambda: next(monotonic_values),
+        panel_width=100,
+    )
+    stale_step, _ = run_shadow_step(
+        sdk,
+        RecordingPredictor(),
+        frame_index=1,
+        telemetry=telemetry_with_gyros,
+        fetch_telemetry=False,
+        started_monotonic=10.0,
+        checkpoint_sha256="abc",
+        maximum_frame_age_sec=1.0,
+        maximum_telemetry_age_sec=1.0,
+        clock=lambda: next(clock_values),
+        monotonic=lambda: next(monotonic_values),
+        panel_width=100,
+    )
+
+    # Same underlying telemetry sample either way -- only freshness differs.
+    assert fresh_step.record["telemetry"]["gyros"] == [[0.0, 0.0, 1.0, 5.0]]
+    assert stale_step.record["telemetry"]["gyros"] is None
+    assert stale_step.record["telemetry"]["latitude"] == 1.0  # other fields unaffected
+
+
+def test_shadow_step_routes_the_locked_localizer_estimate_not_raw_telemetry() -> None:
+    sdk = ReadOnlyFakeSdk()
+    # Deliberately different from ReadOnlyFakeSdk's raw (1.0, 2.0, 3.0), so a
+    # pass-through bug (using raw telemetry despite a locked localizer) is
+    # visible in the assertions below.
+    localizer = SpyLocalizer(locked_estimate=(9.0, 8.0, 45.0))
+    planner = CheckpointRoutePlanner(
+        [{"sequence": 1, "latitude": 9.0, "longitude": 8.001}],
+        switch_radius_m=1.0,
+    )
+    clock_values = iter((100.0, 100.01, 100.1))
+    monotonic_values = iter((10.01, 10.03, 10.2))
+
+    step, _ = run_shadow_step(
+        sdk,
+        RecordingPredictor(),
+        frame_index=0,
+        telemetry=None,
+        fetch_telemetry=True,
+        started_monotonic=10.0,
+        checkpoint_sha256="abc",
+        maximum_frame_age_sec=1.0,
+        maximum_telemetry_age_sec=1.0,
+        clock=lambda: next(clock_values),
+        monotonic=lambda: next(monotonic_values),
+        panel_width=100,
+        route_planner=planner,
+        localizer=localizer,
+    )
+
+    navigation = step.record["navigation"]
+    assert navigation["current_heading_deg"] == pytest.approx(45.0)
+    assert step.record["localization"] == {
+        "locked": True,
+        "fused_latitude": 9.0,
+        "fused_longitude": 8.0,
+        "fused_heading_deg": 45.0,
+        "gyro_trusted": True,
+    }
 
 
 def test_corrected_heading_wraps_and_rejects_invalid_values() -> None:
