@@ -20,6 +20,14 @@ logger = logging.getLogger(__name__)
 
 _STATE_SIZE = 4  # [x_m, y_m, heading_rad, gyro_bias_rad_s]
 
+# Last-resort multiple of heading_outlier_confirm_streak before a
+# persistently-rejected heading reading is force-accepted even while gyro
+# is nominally trusted but never corroborates it either way (e.g. gyro
+# feed silently stops). Not exposed as a config knob -- it only matters
+# for this one degraded edge case, not something a deployment should need
+# to independently tune.
+_HEADING_OUTLIER_HARD_CAP_MULTIPLIER = 3
+
 
 @dataclass(frozen=True)
 class GpsHeadingEkfConfig:
@@ -80,6 +88,31 @@ class GpsHeadingEkfConfig:
     gyro_disagreement_window: int = 20
     gyro_disagreement_threshold: float = 0.5
 
+    # Heading-measurement outlier gate: a live run showed the SDK's
+    # pre-fused `orientation` reading flip by ~170 deg every 10-35s while
+    # the rover sat perfectly still (compass/magnetometer fault, not GPS
+    # position noise -- see localization.py module docs). Kalman gain alone
+    # doesn't reject this: an 8 deg measurement std still pulls the state
+    # most of the way to a 170 deg-away reading in one update, and it fed
+    # straight into the gyro-disagreement correlation above, which then
+    # mistook the bad *measurement* for a bad *gyro* and disabled gyro
+    # fusion to compensate -- the opposite of what was needed, since the
+    # gyro (real motion evidence) was the one telling the truth. A heading
+    # measurement whose innovation exceeds this many degrees is now held
+    # out of both the Kalman update and the gyro-disagreement bookkeeping
+    # instead of being fused.
+    heading_outlier_reject_deg: float = 60.0
+    # A rejected reading isn't discarded forever once gyro *can't* vouch
+    # for it either way (untrusted/disabled): after this many consecutive
+    # rejections, the most recent reading is fused anyway (P has grown
+    # unmeasured that whole time, so the correction snaps straight to it).
+    # While gyro is trusted this count alone is deliberately NOT enough to
+    # force-accept -- see the comment in _update_heading for why a live
+    # run showed that force-accepting on a strike count anyway snaps onto
+    # whatever the rejected reading happens to be at that moment, which is
+    # exactly as likely to be the fault as the truth.
+    heading_outlier_confirm_streak: int = 20
+
     @classmethod
     def from_dict(cls, config: dict[str, Any] | None) -> "GpsHeadingEkfConfig":
         values = dict(config or {})
@@ -102,6 +135,7 @@ class GpsHeadingEkfConfig:
             "max_heading_rate_deg_per_sec": self.max_heading_rate_deg_per_sec,
             "gyro_bias_process_noise": self.gyro_bias_process_noise,
             "gyro_scale_rad_per_sec_per_unit": self.gyro_scale_rad_per_sec_per_unit,
+            "heading_outlier_reject_deg": self.heading_outlier_reject_deg,
         }
         if any(not math.isfinite(value) or value <= 0.0 for value in positive.values()):
             raise ValueError(
@@ -127,6 +161,12 @@ class GpsHeadingEkfConfig:
             -1.0 <= self.gyro_disagreement_threshold <= 1.0
         ):
             raise ValueError("gyro_disagreement_threshold must be in [-1, 1]")
+        if (
+            isinstance(self.heading_outlier_confirm_streak, bool)
+            or not isinstance(self.heading_outlier_confirm_streak, int)
+            or self.heading_outlier_confirm_streak < 1
+        ):
+            raise ValueError("heading_outlier_confirm_streak must be a positive integer")
 
 
 class GpsHeadingEkf:
@@ -183,6 +223,7 @@ class GpsHeadingEkf:
         self._gyro_trusted = True
         self._gyro_delta_accum = 0.0
         self._heading_at_last_measurement: float | None = None
+        self._heading_outlier_streak = 0
         self._disagreement_pairs: deque[tuple[float, float]] = deque(
             maxlen=self.config.gyro_disagreement_window
         )
@@ -373,11 +414,52 @@ class GpsHeadingEkf:
 
     def _update_heading(self, heading_meas_rad: float) -> None:
         assert self._state is not None
+        raw_innovation = normalize_angle_rad(heading_meas_rad - float(self._state[2]))
+        reject_threshold = math.radians(self.config.heading_outlier_reject_deg)
+        if abs(raw_innovation) > reject_threshold:
+            self._heading_outlier_streak += 1
+            # A live rotation test caught the flaw in a plain strike-count
+            # fallback: while gyro is trusted it's still propagating state[2]
+            # every _predict tick (real motion, unfrozen), so a reading that
+            # STAYS rejected for the full confirm streak means gyro actively
+            # disagrees with it -- force-accepting anyway (the original
+            # design) snapped the filter onto a bogus ~170 deg reading mid
+            # rotation, then gyro dragged that wrong anchor along in the
+            # true turn's direction for another ~15s before a second
+            # force-accept happened to land back near truth. A genuine
+            # change gyro agrees with instead drifts state close enough on
+            # its own for innovation to drop under the threshold -- no
+            # force-accept needed. So: only blind-accept on a strike count
+            # once gyro can't vouch either way (untrusted), and even then
+            # only past the normal confirm streak; a much longer hard cap
+            # is the last-resort safety valve for a gyro that's nominally
+            # trusted but simply never being fed anything (never
+            # challenged, never disagrees) so a real change would otherwise
+            # be held out forever.
+            untrusted_fallback = (
+                not self._gyro_trusted
+                and self._heading_outlier_streak >= self.config.heading_outlier_confirm_streak
+            )
+            hard_cap_reached = self._heading_outlier_streak >= (
+                self.config.heading_outlier_confirm_streak
+                * _HEADING_OUTLIER_HARD_CAP_MULTIPLIER
+            )
+            if not (untrusted_fallback or hard_cap_reached):
+                logger.debug(
+                    "GpsHeadingEkf: rejecting heading measurement %.1f deg "
+                    "(innovation %.1f deg exceeds heading_outlier_reject_deg, "
+                    "streak=%d, gyro_trusted=%s)",
+                    math.degrees(heading_meas_rad),
+                    math.degrees(raw_innovation),
+                    self._heading_outlier_streak,
+                    self._gyro_trusted,
+                )
+                return
+        self._heading_outlier_streak = 0
+
         H = np.array([[0.0, 0.0, 1.0, 0.0]])
         R = np.array([[math.radians(self.config.heading_measurement_std_deg) ** 2]])
-        innovation = np.array(
-            [normalize_angle_rad(heading_meas_rad - float(self._state[2]))]
-        )
+        innovation = np.array([raw_innovation])
         measured_delta = None
         if self._heading_at_last_measurement is not None:
             measured_delta = normalize_angle_rad(

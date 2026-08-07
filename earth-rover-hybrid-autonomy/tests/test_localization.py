@@ -171,6 +171,93 @@ def test_gyro_fusion_disables_itself_when_it_disagrees_with_measured_heading() -
     assert disabled_at is not None
 
 
+def test_heading_outlier_burst_is_held_out_and_does_not_flip_fused_heading() -> None:
+    # Reproduces a live capture: the SDK's pre-fused `orientation` reading
+    # flipped ~171 deg every 10-35s while the rover sat perfectly still
+    # (compass/magnetometer fault). Before the outlier gate, Kalman gain
+    # alone pulled the fused heading to follow every flip within one
+    # update. A burst shorter than heading_outlier_confirm_streak must now
+    # be held out entirely.
+    clock = Clock()
+    filt = ekf(clock, origin_lock_fix_count=1, heading_outlier_confirm_streak=20)
+    filt.observe_gps_heading(37.0, 127.0, 176.0)
+
+    for _ in range(10):
+        clock.value += 0.5
+        filt.observe_gps_heading(37.0, 127.0, 5.0)  # bogus ~171 deg flip
+        _, _, heading = filt.current_estimate()
+        assert abs(heading - 176.0) < 5.0
+
+    assert filt.gyro_trusted  # the bad reading must not poison gyro trust
+
+
+def test_persistent_heading_outlier_is_accepted_once_gyro_is_untrusted() -> None:
+    # A strike count alone must not force-accept while gyro is trusted (a
+    # live rotation test showed this snaps onto whatever the rejected
+    # reading happens to be at that moment -- exactly as likely to be the
+    # fault as the truth, since gyro is meanwhile dead-reckoning state
+    # toward the truth on its own and would otherwise catch up normally).
+    # Once gyro genuinely can't vouch either way, the gate must not hold a
+    # sustained change out forever -- confirm_streak rejects force it
+    # through.
+    random.seed(4)
+    clock = Clock()
+    filt = ekf(
+        clock,
+        origin_lock_fix_count=1,
+        gyro_disagreement_window=10,
+        heading_outlier_confirm_streak=5,
+    )
+    heading = 0.0
+    for _ in range(15):
+        clock.value += 0.5
+        filt.observe_gyro([0.0, 0.0, 20.0 + random.uniform(-3, 3)])  # says "turning right"
+        heading -= 5.0 + random.uniform(-3, 3)  # truth is turning left
+        filt.observe_gps_heading(37.0, 127.0, heading % 360.0)
+    assert not filt.gyro_trusted  # sanity check: this run should have disabled it
+
+    for _ in range(10):
+        clock.value += 0.5
+        filt.observe_gps_heading(37.0, 127.0, 176.0)
+
+    _, _, fused_heading = filt.current_estimate()
+    assert abs(fused_heading - 176.0) < 5.0
+
+
+def test_persistent_heading_outlier_hits_hard_cap_when_gyro_never_corroborates() -> None:
+    # Last-resort safety valve: even with gyro nominally trusted the whole
+    # time (never fed anything, so never challenged either), a genuinely
+    # sustained heading change must not be held out forever.
+    clock = Clock()
+    filt = ekf(clock, origin_lock_fix_count=1, heading_outlier_confirm_streak=5)
+    filt.observe_gps_heading(37.0, 127.0, 176.0)
+
+    for _ in range(20):  # well past confirm_streak(5) * hard-cap multiplier
+        clock.value += 0.5
+        filt.observe_gps_heading(37.0, 127.0, 5.0)
+
+    _, _, heading = filt.current_estimate()
+    assert abs(heading - 5.0) < 5.0
+    assert filt.gyro_trusted  # never challenged -- still nominally trusted
+
+
+def test_gyro_corroborated_large_heading_change_is_accepted_immediately() -> None:
+    # The outlier gate must not block a real fast turn the gyro is
+    # actively tracking -- only readings the gyro doesn't corroborate.
+    clock = Clock()
+    filt = ekf(clock, origin_lock_fix_count=1)
+    filt.observe_gps_heading(37.0, 127.0, 0.0)
+
+    for _ in range(4):
+        clock.value += 0.5
+        filt.observe_gyro([0.0, 0.0, 90.0])  # gyro honestly reports the turn
+        filt.observe_gps_heading(37.0, 127.0, 90.0)
+
+    _, _, heading = filt.current_estimate()
+    assert heading == pytest.approx(90.0, abs=10.0)
+    assert filt._heading_outlier_streak == 0
+
+
 def test_invalid_and_missing_inputs_do_not_raise_or_corrupt_state() -> None:
     clock = Clock()
     filt = ekf(clock, origin_lock_fix_count=2)
@@ -211,6 +298,8 @@ def test_config_from_dict_defaults_are_sane_and_validate() -> None:
         {"gyro_yaw_axis_index": 3},
         {"gyro_disagreement_window": 1},
         {"gyro_disagreement_threshold": 1.5},
+        {"heading_outlier_reject_deg": 0.0},
+        {"heading_outlier_confirm_streak": 0},
     ],
 )
 def test_config_validate_rejects_bad_values(overrides: dict) -> None:

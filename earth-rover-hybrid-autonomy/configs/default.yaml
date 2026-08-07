@@ -124,6 +124,21 @@ localization:
   gyro_disagreement_window: 20
   gyro_disagreement_threshold: 0.5
 
+  # Heading-measurement outlier gate. A live run showed the SDK's
+  # pre-fused `orientation` reading flip by ~170 deg every 10-35s while the
+  # rover sat perfectly still (compass/magnetometer fault, not GPS
+  # position noise). A reading whose innovation exceeds this many degrees
+  # is held out of the filter (not fused, not counted as gyro
+  # disagreement) instead of being trusted.
+  heading_outlier_reject_deg: 60.0
+  # Once gyro fusion is untrusted/disabled (so it can no longer vouch for
+  # a rejected reading either way), this many consecutive rejections force
+  # the most recent one through rather than holding it out forever. At the
+  # SDK's ~2 Hz telemetry cadence this is ~10s. While gyro IS trusted, a
+  # strike count alone is deliberately not enough -- see
+  # localization.py:GpsHeadingEkf._update_heading.
+  heading_outlier_confirm_streak: 20
+
 planner:
   mode: motion_primitives
   # Finer steps near center let the planner express a small correction
