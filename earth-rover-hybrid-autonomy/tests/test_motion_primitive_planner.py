@@ -131,6 +131,57 @@ def test_uses_adjacent_safe_candidate_when_straight_near_field_is_dangerous() ->
     assert abs(plan.selected_candidate.heading_deg) in {15.0, 30.0, 45.0}
 
 
+def test_near_field_soft_penalty_is_continuous_above_the_hard_threshold() -> None:
+    # near_field_risk_penalty (the hard-threshold term) is 0 for any
+    # candidate above near_field_stop_threshold, so two "safe by threshold"
+    # candidates score identically on safety with the hard term alone.
+    # near_field_soft_penalty must differ even when both are "safe".
+    clock = Clock()
+    local = planner(clock, near_field_stop_threshold=0.5)
+    score, valid = score_map_for_heading(0.0, base=0.9, path_score=0.9)
+    block_near_field(score, 0.0, value=0.51)  # just above the hard threshold
+
+    plan = local.plan(score, valid, target_heading_error_rad=0.0)
+
+    straight = next(c for c in plan.candidate_scores if c.heading_deg == 0.0)
+    wide = next(c for c in plan.candidate_scores if c.heading_deg == -45.0)
+    assert straight.near_field_risk_penalty == 0.0  # "safe" by the hard threshold
+    assert wide.near_field_risk_penalty == 0.0
+    assert straight.near_field_soft_penalty == pytest.approx(
+        1.0 - straight.near_field_low_percentile
+    )
+    # Still meaningfully less safe than the wide, clear candidate even
+    # though the hard term can't see any difference between them.
+    assert straight.near_field_soft_penalty > wide.near_field_soft_penalty
+
+
+def test_near_field_soft_penalty_can_prefer_a_safer_candidate_over_goal_alignment() -> None:
+    # The actual bug report: the rover needed to turn back toward the open
+    # road but kept driving toward a wall instead, because the wall-facing
+    # candidate was still "safe by threshold" and better goal-aligned, and
+    # nothing before this penalty existed to weigh "how much safer" once a
+    # candidate cleared the hard threshold.
+    clock = Clock()
+    score, valid = score_map_for_heading(0.0, base=0.9, path_score=0.9)
+    block_near_field(score, 0.0, value=0.51)  # straight: technically safe, but close to a wall
+
+    without_soft_term = planner(
+        clock, near_field_stop_threshold=0.5, near_field_soft_risk_weight=0.0
+    )
+    plan_without = without_soft_term.plan(
+        score.copy(), valid, target_heading_error_rad=math.radians(5.0)
+    )
+    assert plan_without.selected_candidate.heading_deg == pytest.approx(0.0)
+
+    with_soft_term = planner(
+        clock, near_field_stop_threshold=0.5, near_field_soft_risk_weight=1.5
+    )
+    plan_with = with_soft_term.plan(
+        score.copy(), valid, target_heading_error_rad=math.radians(5.0)
+    )
+    assert plan_with.selected_candidate.heading_deg != 0.0
+
+
 def test_small_score_gain_keeps_committed_candidate() -> None:
     clock = Clock()
     local = planner(clock)

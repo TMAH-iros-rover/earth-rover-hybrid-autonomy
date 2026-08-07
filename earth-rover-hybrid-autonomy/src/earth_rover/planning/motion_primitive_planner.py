@@ -30,6 +30,19 @@ class MotionPrimitivePlannerConfig:
     continuity_weight: float = 0.45
     curvature_weight: float = 0.10
     near_field_risk_weight: float = 1.5
+    # near_field_risk_weight only applies once near_low drops below
+    # near_field_stop_threshold -- above that, two candidates score
+    # identically (zero risk penalty) regardless of whether one is at 0.61
+    # and the other at 0.99. That let goal_heading_weight fully decide
+    # between two "safe by threshold" candidates, including picking one
+    # that's markedly closer to an obstacle just because it's better
+    # goal-aligned -- observed as the rover trying to drive back toward a
+    # wall instead of the open road once it was already close to one. This
+    # adds a small continuous penalty on (1 - near_low) with no threshold,
+    # so a candidate that's merely "safe enough" still loses some ground to
+    # a candidate that's clearly safer, even before near_field_risk_weight
+    # engages.
+    near_field_soft_risk_weight: float = 0.5
     path_score_threshold: float = 0.45
     near_field_stop_threshold: float = 0.25
     near_field_percentile: float = 10.0
@@ -76,6 +89,8 @@ class MotionPrimitivePlannerConfig:
             value = float(getattr(self, name))
             if not math.isfinite(value) or value <= 0.0:
                 raise ValueError(f"planner.{name} must be finite and positive")
+        if not math.isfinite(self.near_field_soft_risk_weight) or self.near_field_soft_risk_weight < 0.0:
+            raise ValueError("planner.near_field_soft_risk_weight must be finite and non-negative")
 
 
 @dataclass(frozen=True)
@@ -93,6 +108,7 @@ class CandidateScore:
     curvature_magnitude: float
     curvature_penalty: float
     near_field_risk_penalty: float
+    near_field_soft_penalty: float
     final_score_raw: float
     final_score: float
     hard_rejected: bool
@@ -116,6 +132,7 @@ class CandidateScore:
             "continuity_penalty": self.continuity_penalty,
             "curvature_penalty": self.curvature_penalty,
             "near_field_risk_penalty": self.near_field_risk_penalty,
+            "near_field_soft_penalty": self.near_field_soft_penalty,
             "final_score": self.final_score,
             "hard_rejected": self.hard_rejected,
             "reject_reason": self.reject_reason,
@@ -437,6 +454,7 @@ class MotionPrimitivePlanner:
                         curvature_magnitude=abs(float(heading_deg)) / maximum_heading,
                         curvature_penalty=abs(float(heading_deg)) / maximum_heading,
                         near_field_risk_penalty=1.0,
+                        near_field_soft_penalty=1.0,
                         final_score_raw=-10.0,
                         final_score=-10.0,
                         hard_rejected=True,
@@ -466,6 +484,10 @@ class MotionPrimitivePlanner:
             continuity_penalty = min(1.0, continuity_delta / maximum_heading)
             curvature_mag = min(1.0, abs(float(heading_deg)) / maximum_heading)
             near_risk = max(0.0, self.config.near_field_stop_threshold - near_low)
+            # Unlike near_risk, this applies at every near_low value, not
+            # just below near_field_stop_threshold -- see
+            # near_field_soft_risk_weight's docstring for why.
+            near_soft_penalty = max(0.0, min(1.0, 1.0 - near_low))
             hard_rejected = near_low < self.config.near_field_stop_threshold
             final_raw = (
                 self.config.traversability_weight * (0.70 * weighted_mean + 0.30 * low_percentile)
@@ -473,6 +495,7 @@ class MotionPrimitivePlanner:
                 - self.config.continuity_weight * continuity_penalty
                 - self.config.curvature_weight * curvature_mag
                 - self.config.near_field_risk_weight * near_risk
+                - self.config.near_field_soft_risk_weight * near_soft_penalty
             )
             candidates.append(
                 CandidateScore(
@@ -489,6 +512,7 @@ class MotionPrimitivePlanner:
                     curvature_magnitude=curvature_mag,
                     curvature_penalty=curvature_mag,
                     near_field_risk_penalty=near_risk,
+                    near_field_soft_penalty=near_soft_penalty,
                     final_score_raw=final_raw,
                     final_score=final_raw,
                     hard_rejected=hard_rejected,
@@ -588,6 +612,7 @@ class MotionPrimitivePlanner:
             curvature_magnitude=abs(clipped_heading) / max(1.0, self.config.maximum_visual_heading_deg),
             curvature_penalty=abs(clipped_heading) / max(1.0, self.config.maximum_visual_heading_deg),
             near_field_risk_penalty=max(0.0, self.config.near_field_stop_threshold - near_low),
+            near_field_soft_penalty=max(0.0, min(1.0, 1.0 - near_low)),
             final_score_raw=1.0,
             final_score=1.0,
             hard_rejected=not near_safe,

@@ -135,6 +135,16 @@ planner:
   continuity_weight: 0.45
   curvature_weight: 0.10
   near_field_risk_weight: 1.5
+  # near_field_risk_weight above is a hard hinge -- 0 penalty for any
+  # candidate whose near-field score is already above
+  # near_field_stop_threshold, so two "safe by threshold" candidates (say
+  # 0.61 and 0.99) score identically on safety, and goal_heading_weight
+  # alone decides between them -- including possibly preferring the one
+  # closer to an obstacle because it's better goal-aligned. This applies a
+  # smaller, continuous penalty on (1 - near_field) with no threshold, so
+  # there's always some pull toward the safer candidate even before the
+  # hard penalty engages.
+  near_field_soft_risk_weight: 0.5
   path_score_threshold: 0.45
   # near_risk = max(0, near_field_stop_threshold - near_low) in
   # motion_primitive_planner.py:_score_candidates -- this is exactly 0 (no
