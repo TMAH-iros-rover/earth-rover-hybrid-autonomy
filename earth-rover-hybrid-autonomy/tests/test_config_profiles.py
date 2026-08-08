@@ -7,7 +7,9 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_latency_2s_profile_loads_without_changing_default_file():
-    config = load_config(ROOT / "configs/default.yaml", ROOT / "configs/urban_latency_2s.yaml")
+    config = load_config(
+        ROOT / "configs/default.yaml", ROOT / "research/configs/urban_latency_2s.yaml"
+    )
 
     assert config["project"]["profile"] == "latency_2s"
     assert config["latency"]["sensor_delay_sec"] == 2.0
@@ -18,7 +20,9 @@ def test_latency_2s_profile_loads_without_changing_default_file():
 
 
 def test_traversability_replay_profile_is_log_only_and_configurable():
-    config = load_config(ROOT / "configs/default.yaml", ROOT / "configs/urban_replay_v2.yaml")
+    config = load_config(
+        ROOT / "configs/default.yaml", ROOT / "research/configs/urban_replay_v2.yaml"
+    )
 
     assert config["recovery"]["enabled"] is False
     assert config["traversability_adapter"]["sector_boundaries"] == [0.0, 0.34, 0.66, 1.0]

@@ -76,17 +76,17 @@ pip install -r requirements.txt
 python scripts/run_sdk_smoke_test.py --config configs/default.yaml --no-motion
 ```
 
-## Run Urban MVP
+## Run Urban MVP (archived, see `research/`)
 ```bash
-python scripts/run_urban_mvp.py --config configs/default.yaml
+python research/scripts/run_urban_mvp.py --config configs/default.yaml
 ```
 
 ## Safety
 Default motion limits are conservative. The system stops on stale frame, stale data, SDK failure, or emergency condition.
 
-## SegFormer v2 Offline Planner Replay
+## SegFormer v2 Offline Planner Replay (archived, see `research/`)
 
-`scripts/run_traversability_planner_replay_v2.sh` connects the approved SegFormer-B0 v2 checkpoint to the traversability adapter, goal-aware local planner, existing safety monitor, controller, and command filter. It reads recorded front-camera HLS data and writes expected commands to CSV/JSONL plus an H.264 review video.
+`research/scripts/run_traversability_planner_replay_v2.sh` connects the approved SegFormer-B0 v2 checkpoint to the traversability adapter, goal-aware local planner, existing safety monitor, controller, and command filter. It reads recorded front-camera HLS data and writes expected commands to CSV/JSONL plus an H.264 review video.
 
 This is a log-only integration gate. FrodoBots recordings do not provide the mission waypoint used by the Urban MVP, so the replay requires an explicit fixed heading error and records `gps_valid=false`, `goal_input_mode=fixed_heading_error`, and `command_transmitted=false`. It does not call the SDK or validate GPS navigation, recovery, or rover motion.
 
@@ -94,14 +94,14 @@ Run a five-second Dell smoke replay:
 
 ```bash
 DURATION_SECONDS=5 RIDE_COUNT=1 LATENCY_SEC=0 GOAL_HEADING_ERROR_DEG=0 \
-  ./scripts/run_traversability_planner_replay_v2.sh
+  ./research/scripts/run_traversability_planner_replay_v2.sh
 ```
 
 Run the two-second delayed profile in a separate output directory:
 
 ```bash
 LATENCY_SEC=2 GOAL_HEADING_ERROR_DEG=20 \
-  ./scripts/run_traversability_planner_replay_v2.sh
+  ./research/scripts/run_traversability_planner_replay_v2.sh
 ```
 
 The default output is

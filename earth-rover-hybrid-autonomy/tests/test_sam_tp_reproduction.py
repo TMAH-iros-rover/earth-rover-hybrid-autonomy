@@ -9,8 +9,8 @@ import pytest
 import yaml
 
 import training.sam_tp_reproduction as sam_tp_reproduction
-from training.inspect_sam_tp_compatibility import compare_architecture_configs
-from training.run_sam_tp_video_review import (
+from research.training.inspect_sam_tp_compatibility import compare_architecture_configs
+from research.training.run_sam_tp_video_review import (
     compose_sam_tp_panels,
     parse_args as parse_video_review_args,
     process_dataset,
@@ -34,8 +34,8 @@ from training.sam_tp_reproduction import (
     validate_rgb_image,
     write_json,
 )
-from training.traversability_video_review_v2 import ReviewFrame, ReviewSegment
-from training.write_sam_tp_reproduction_report import (
+from research.training.traversability_video_review_v2 import ReviewFrame, ReviewSegment
+from research.training.write_sam_tp_reproduction_report import (
     aggregate_reports,
     markdown_report,
 )

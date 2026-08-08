@@ -55,7 +55,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--expected-checkpoint-sha256", required=True)
     parser.add_argument("--output-dir", required=True)
-    parser.add_argument("--target-fps", type=float, default=8.0)
+    parser.add_argument("--target-fps", type=float, default=4.0)
     parser.add_argument("--telemetry-hz", type=float, default=2.0)
     parser.add_argument("--maximum-frame-age-sec", type=float, default=1.0)
     parser.add_argument("--maximum-telemetry-age-sec", type=float, default=1.0)

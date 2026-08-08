@@ -22,7 +22,7 @@ def test_setup_falls_back_to_an_ignored_independent_venv() -> None:
 
 
 def test_runner_auto_detects_conda_or_venv_without_system_install() -> None:
-    script = (ROOT / "scripts/run_sam_tp_reproduction.sh").read_text(encoding="utf-8")
+    script = (ROOT / "research/scripts/run_sam_tp_reproduction.sh").read_text(encoding="utf-8")
 
     assert 'ENV_BACKEND="${ENV_BACKEND:-auto}"' in script
     assert 'elif [[ -x "$VENV_PATH/bin/python" ]]' in script
@@ -31,7 +31,7 @@ def test_runner_auto_detects_conda_or_venv_without_system_install() -> None:
 
 
 def test_trajectory_primitive_runner_is_checkpoint_free_and_read_only() -> None:
-    script = (ROOT / "scripts/run_sam_tp_trajectory_primitives.sh").read_text(
+    script = (ROOT / "research/scripts/run_sam_tp_trajectory_primitives.sh").read_text(
         encoding="utf-8"
     )
 
@@ -44,7 +44,7 @@ def test_trajectory_primitive_runner_is_checkpoint_free_and_read_only() -> None:
 
 
 def test_phase1_video_runner_is_offline_and_uses_geometry_flag() -> None:
-    script = (ROOT / "scripts/run_sam_tp_phase1_video_review.sh").read_text(
+    script = (ROOT / "research/scripts/run_sam_tp_phase1_video_review.sh").read_text(
         encoding="utf-8"
     )
 
@@ -62,7 +62,7 @@ def test_video_review_cli_resolves_src_outside_repository(tmp_path: Path) -> Non
     result = subprocess.run(
         [
             sys.executable,
-            str(ROOT / "training/run_sam_tp_video_review.py"),
+            str(ROOT / "research/training/run_sam_tp_video_review.py"),
             "--help",
         ],
         cwd=tmp_path,
