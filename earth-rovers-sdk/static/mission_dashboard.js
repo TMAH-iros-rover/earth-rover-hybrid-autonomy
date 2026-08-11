@@ -45,7 +45,7 @@ const SAM_TP_OVERLAY_PATH = "/sam-tp-overlay.jpg";
 const AUTONOMY_STATUS_PATH = "/autonomy-status";
 const AUTONOMY_STOP_PATH = "/autonomy-stop";
 const AUTONOMY_RESUME_PATH = "/autonomy-resume";
-const TRAIL_MIN_DISTANCE_M = 2.0;
+const TRAIL_MIN_DISTANCE_M = 0.0;
 
 const elements = {
   connection: document.querySelector("#connection-state"),

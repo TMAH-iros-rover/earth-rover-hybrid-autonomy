@@ -9,7 +9,7 @@ WORKSPACE_ROOT="$(cd "$PROJECT_ROOT/.." && pwd)"
 #   checkpoints/sam_tp/best_sam_tp.pt) -- only CHECKPOINT is required, and it
 #   runs fine in the project's normal Python env since torch/transformers are
 #   already in requirements.txt.
-PREDICTOR_BACKEND="${PREDICTOR_BACKEND:-official}"
+PREDICTOR_BACKEND="${PREDICTOR_BACKEND:-hf}"
 UPSTREAM_ROOT="${UPSTREAM_ROOT:-$WORKSPACE_ROOT/external/GENIE-SAMTP}"
 ENV_NAME="${ENV_NAME:-sam_tp_repro}"
 if [[ "$PREDICTOR_BACKEND" == "hf" ]]; then
