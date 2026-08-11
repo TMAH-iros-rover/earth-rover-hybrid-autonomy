@@ -1,0 +1,245 @@
+{
+  "schema_version": 1,
+  "camera": "front",
+  "image_width": 1024,
+  "image_height": 576,
+  "checkerboard": {
+    "inner_corners": [
+      7,
+      10
+    ],
+    "square_size_mm": 25.0
+  },
+  "camera_matrix": [
+    [
+      491.1568229675591,
+      0.0,
+      509.3800751643276
+    ],
+    [
+      0.0,
+      493.9500442214054,
+      267.4264474521625
+    ],
+    [
+      0.0,
+      0.0,
+      1.0
+    ]
+  ],
+  "distortion_model": "opencv_plumb_bob",
+  "dist_coeffs": [
+    -0.27202200129904086,
+    0.0714303303013014,
+    -0.000338402093278862,
+    0.0010053983916549474,
+    -0.008558501568650742
+  ],
+  "rms_error": 0.4763683176113264,
+  "mean_reprojection_error_px": 0.45215443002254113,
+  "valid_image_count": 50,
+  "rejected_image_count": 0,
+  "per_view_errors": [
+    {
+      "file": "front_0001.png",
+      "error_px": 0.16149060217383726
+    },
+    {
+      "file": "front_0002.png",
+      "error_px": 0.4826024943556174
+    },
+    {
+      "file": "front_0003.png",
+      "error_px": 0.29847760050342775
+    },
+    {
+      "file": "front_0004.png",
+      "error_px": 0.2369897695709984
+    },
+    {
+      "file": "front_0005.png",
+      "error_px": 0.4467480511781773
+    },
+    {
+      "file": "front_0006.png",
+      "error_px": 0.5414506864457472
+    },
+    {
+      "file": "front_0007.png",
+      "error_px": 0.2780347740831499
+    },
+    {
+      "file": "front_0008.png",
+      "error_px": 0.3790542223934093
+    },
+    {
+      "file": "front_0009.png",
+      "error_px": 0.38373936101562944
+    },
+    {
+      "file": "front_0010.png",
+      "error_px": 0.4587944782193557
+    },
+    {
+      "file": "front_0011.png",
+      "error_px": 0.5863577190259119
+    },
+    {
+      "file": "front_0012.png",
+      "error_px": 0.5986915248798401
+    },
+    {
+      "file": "front_0013.png",
+      "error_px": 0.3563224237666264
+    },
+    {
+      "file": "front_0014.png",
+      "error_px": 0.45960851512931183
+    },
+    {
+      "file": "front_0015.png",
+      "error_px": 0.5299999145053401
+    },
+    {
+      "file": "front_0016.png",
+      "error_px": 0.7079982637679928
+    },
+    {
+      "file": "front_0017.png",
+      "error_px": 0.5846148998279337
+    },
+    {
+      "file": "front_0018.png",
+      "error_px": 0.5720607792508324
+    },
+    {
+      "file": "front_0019.png",
+      "error_px": 0.22902076826433695
+    },
+    {
+      "file": "front_0020.png",
+      "error_px": 0.32836643010667793
+    },
+    {
+      "file": "front_0021.png",
+      "error_px": 0.23378600092390295
+    },
+    {
+      "file": "front_0022.png",
+      "error_px": 0.6601419355802697
+    },
+    {
+      "file": "front_0023.png",
+      "error_px": 0.38971609288571385
+    },
+    {
+      "file": "front_0024.png",
+      "error_px": 0.44249665895346146
+    },
+    {
+      "file": "front_0025.png",
+      "error_px": 0.43552500354786255
+    },
+    {
+      "file": "front_0026.png",
+      "error_px": 0.42084871650550376
+    },
+    {
+      "file": "front_0027.png",
+      "error_px": 0.4538969809187981
+    },
+    {
+      "file": "front_0028.png",
+      "error_px": 0.6548557132650169
+    },
+    {
+      "file": "front_0029.png",
+      "error_px": 0.634755023109768
+    },
+    {
+      "file": "front_0030.png",
+      "error_px": 0.42857027548415283
+    },
+    {
+      "file": "front_0031.png",
+      "error_px": 0.5132986744132149
+    },
+    {
+      "file": "front_0032.png",
+      "error_px": 0.5195786713942641
+    },
+    {
+      "file": "front_0033.png",
+      "error_px": 0.7202515932654172
+    },
+    {
+      "file": "front_0034.png",
+      "error_px": 0.704996687445288
+    },
+    {
+      "file": "front_0035.png",
+      "error_px": 0.5838397449512601
+    },
+    {
+      "file": "front_0036.png",
+      "error_px": 0.48043061294320094
+    },
+    {
+      "file": "front_0037.png",
+      "error_px": 0.5665325877866232
+    },
+    {
+      "file": "front_0038.png",
+      "error_px": 0.3967268950376842
+    },
+    {
+      "file": "front_0039.png",
+      "error_px": 0.6224712365459603
+    },
+    {
+      "file": "front_0040.png",
+      "error_px": 0.3486777910701945
+    },
+    {
+      "file": "front_0041.png",
+      "error_px": 0.3111854237462585
+    },
+    {
+      "file": "front_0042.png",
+      "error_px": 0.30598842546230415
+    },
+    {
+      "file": "front_0043.png",
+      "error_px": 0.26931674436257097
+    },
+    {
+      "file": "front_0044.png",
+      "error_px": 0.31794913249888235
+    },
+    {
+      "file": "front_0045.png",
+      "error_px": 0.4504264336385077
+    },
+    {
+      "file": "front_0046.png",
+      "error_px": 0.7280125260021584
+    },
+    {
+      "file": "front_0047.png",
+      "error_px": 0.593075371489162
+    },
+    {
+      "file": "front_0048.png",
+      "error_px": 0.3854515814468018
+    },
+    {
+      "file": "front_0049.png",
+      "error_px": 0.18671760973436827
+    },
+    {
+      "file": "front_0050.png",
+      "error_px": 0.22777807825433186
+    }
+  ],
+  "rejected_images": []
+}
