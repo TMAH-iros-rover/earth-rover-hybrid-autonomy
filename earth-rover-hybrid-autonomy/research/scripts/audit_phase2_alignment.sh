@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+RESEARCH_ROOT="$PROJECT_ROOT/research"
 DATASET_ROOT="${DATASET_ROOT:-$HOME/datasets/output_rides_0}"
 MANIFEST_DIR="${MANIFEST_DIR:-$HOME/datasets/manifests/frodobots_2k_phase2/full_dataset}"
 MANIFEST_PATH="$MANIFEST_DIR/manifest.csv"
@@ -37,21 +38,21 @@ print(digest.hexdigest())
 PY
 }
 
-cd "$ROOT_DIR"
+cd "$PROJECT_ROOT"
 
 echo "[1/5] Running focused edge-case tests"
 PYTHONDONTWRITEBYTECODE=1 "$PYTHON" -m pytest \
     -p no:cacheprovider -q \
-    tests/test_frodobots_2k_alignment_audit.py \
-    tests/test_frodobots_2k_dataset.py \
-    tests/test_frodobots_2k_manifest.py \
-    tests/test_action_labels.py
+    research/tests/test_frodobots_2k_alignment_audit.py \
+    research/tests/test_frodobots_2k_dataset.py \
+    research/tests/test_frodobots_2k_manifest.py \
+    research/tests/test_action_labels.py
 
 echo "[2/5] Recording raw dataset fingerprint"
 before_fingerprint="$(dataset_fingerprint)"
 
 echo "[3/5] Building a full read-only manifest for all rides"
-if ! PYTHONDONTWRITEBYTECODE=1 "$PYTHON" training/build_frodobots_2k_manifest.py \
+if ! PYTHONDONTWRITEBYTECODE=1 "$PYTHON" research/training/build_frodobots_2k_manifest.py \
     --dataset-root "$DATASET_ROOT" \
     --output-dir "$MANIFEST_DIR" \
     --control-tolerance-ms 100; then
@@ -64,7 +65,7 @@ fi
 
 echo "[4/5] Auditing transform, temporal strips, action signs, and edge cases"
 audit_status=0
-PYTHONDONTWRITEBYTECODE=1 "$PYTHON" training/audit_frodobots_2k_alignment.py \
+PYTHONDONTWRITEBYTECODE=1 "$PYTHON" research/training/audit_frodobots_2k_alignment.py \
     --dataset-root "$DATASET_ROOT" \
     --manifest "$MANIFEST_PATH" \
     --output-dir "$OUTPUT_DIR" || audit_status=$?

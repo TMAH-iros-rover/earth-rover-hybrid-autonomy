@@ -185,6 +185,46 @@ def test_dashboard_javascript_has_no_control_endpoint() -> None:
     assert "GPS trail (≥2 m)" in html
 
 
+def test_dashboard_renders_rotate_escape_side_sector_and_recovery_state() -> None:
+    # This file's other JS assertions above are string-presence checks, not
+    # execution -- there's no JS runtime in this environment to actually run
+    # updateSideSectorOverlay/updateRecoveryMetrics. This test follows the
+    # same established pattern: it guards the wiring (DOM ids referenced by
+    # JS exist in the HTML; both status.planner.side_sector and
+    # status.recovery are read from the two poll functions that already
+    # fetch them; both render functions null-check their input so a missing
+    # side_sector/recovery -- the common case, since both features default
+    # to disabled -- can't throw and break the rest of the dashboard).
+    js = (ROOT / "static/mission_dashboard.js").read_text(encoding="utf-8")
+    html = (ROOT / "static/mission_dashboard.html").read_text(encoding="utf-8")
+    css = (ROOT / "static/mission_dashboard.css").read_text(encoding="utf-8")
+
+    assert 'id="side-sector-overlay"' in html
+    assert 'id="side-sector-left"' in html
+    assert 'id="side-sector-right"' in html
+    assert 'id="recovery-metrics"' in html
+
+    assert "function updateSideSectorOverlay(sideSector)" in js
+    assert "function updateRecoveryMetrics(recovery)" in js
+    # Both renderers must be reachable from data the dashboard already polls.
+    assert "status.planner && status.planner.side_sector" in js
+    assert "updateSideSectorOverlay(status.planner && status.planner.side_sector)" in js
+    assert "updateRecoveryMetrics(status.recovery)" in js
+    assert "direction_confirm_count" in js
+    assert "direction_confirm_required" in js
+    # Fail-safe on absent/malformed data (the default, fail-closed state):
+    # neither renderer may assume its argument is a populated object.
+    assert "if (!sideSector || !side || typeof side !== \"object\")" in js
+    assert "if (!recovery || typeof recovery !== \"object\" || !recovery.maneuver_phase)" in js
+    # Cleared explicitly on request failure, not left showing stale data.
+    assert "updateSideSectorOverlay(null);" in js
+    assert "updateRecoveryMetrics(null);" in js
+
+    assert ".side-sector-rect" in css
+    assert ".side-sector-rect.chosen" in css
+    assert ".recovery-metrics" in css
+
+
 def test_direct_rover_connect_uses_auth_and_browser_bridge(monkeypatch) -> None:
     calls = []
 

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+RESEARCH_ROOT="$PROJECT_ROOT/research"
 DATASET_ROOT="${DATASET_ROOT:-$HOME/datasets/output_rides_0}"
 MANIFEST_PATH="${MANIFEST_PATH:-$HOME/datasets/manifests/frodobots_2k_phase2/full_dataset/manifest.csv}"
 BUNDLE_ROOT="${BUNDLE_ROOT:-$HOME/datasets/review_bundles/traversability_pilot_v1}"
@@ -46,13 +47,13 @@ print(digest.hexdigest())
 PY
 }
 
-cd "$ROOT_DIR"
+cd "$PROJECT_ROOT"
 
 echo "[1/5] Running focused traversability review tests"
 PYTHONDONTWRITEBYTECODE=1 "$PYTHON" -m pytest \
     -p no:cacheprovider -q \
-    tests/test_traversability_review.py \
-    tests/test_frodobots_2k_dataset.py
+    research/tests/test_traversability_review.py \
+    research/tests/test_frodobots_2k_dataset.py
 
 echo "[2/5] Checking CUDA, packages, and raw dataset fingerprint"
 "$PYTHON" - <<'PY'
@@ -68,7 +69,7 @@ PY
 before_fingerprint="$(dataset_fingerprint)"
 
 echo "[3/5] Building the conservative pseudo-label review bundle"
-PYTHONDONTWRITEBYTECODE=1 "$PYTHON" training/build_traversability_review_bundle.py \
+PYTHONDONTWRITEBYTECODE=1 "$PYTHON" research/training/build_traversability_review_bundle.py \
     --dataset-root "$DATASET_ROOT" \
     --manifest "$MANIFEST_PATH" \
     --output-dir "$BUNDLE_ROOT" \
@@ -79,7 +80,7 @@ PYTHONDONTWRITEBYTECODE=1 "$PYTHON" training/build_traversability_review_bundle.
     --require-cuda
 
 echo "[4/5] Validating bundle integrity and unreviewed gate"
-PYTHONDONTWRITEBYTECODE=1 "$PYTHON" training/validate_traversability_review.py \
+PYTHONDONTWRITEBYTECODE=1 "$PYTHON" research/training/validate_traversability_review.py \
     --bundle "$BUNDLE_ROOT"
 
 echo "[5/5] Verifying raw dataset immutability and bundle report"

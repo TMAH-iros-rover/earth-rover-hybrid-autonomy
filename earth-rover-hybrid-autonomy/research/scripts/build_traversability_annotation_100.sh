@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+RESEARCH_ROOT="$PROJECT_ROOT/research"
 DATASET_ROOT="${DATASET_ROOT:-$HOME/datasets/output_rides_0}"
 MANIFEST_PATH="${MANIFEST_PATH:-$HOME/datasets/manifests/frodobots_2k_phase2/full_dataset/manifest.csv}"
 EXISTING_PILOT="${EXISTING_PILOT:-$HOME/datasets/generated/traversability_dataset_v1/pilot_20}"
@@ -64,15 +65,15 @@ print(digest.hexdigest())
 PY
 }
 
-cd "$ROOT_DIR"
+cd "$PROJECT_ROOT"
 before_git_status="$(git status --porcelain)"
 
 echo "[1/7] Running focused sampling and annotation-bundle tests"
 PYTHONDONTWRITEBYTECODE=1 "$PYTHON" -m pytest \
     -p no:cacheprovider -q \
-    tests/test_traversability_expansion.py \
-    tests/test_traversability_annotation.py \
-    tests/test_traversability_review.py
+    research/tests/test_traversability_expansion.py \
+    research/tests/test_traversability_annotation.py \
+    research/tests/test_traversability_review.py
 
 echo "[2/7] Checking CUDA and recording immutable-source fingerprints"
 "$PYTHON" - <<'PY'
@@ -86,7 +87,7 @@ before_dataset="$(tree_fingerprint "$DATASET_ROOT")"
 before_pilot="$(tree_fingerprint "$EXISTING_PILOT")"
 
 echo "[3/7] Building a bounded 240-frame semantic candidate pool"
-PYTHONDONTWRITEBYTECODE=1 "$PYTHON" training/build_traversability_review_bundle.py \
+PYTHONDONTWRITEBYTECODE=1 "$PYTHON" research/training/build_traversability_review_bundle.py \
     --dataset-root "$DATASET_ROOT" \
     --manifest "$MANIFEST_PATH" \
     --output-dir "$CANDIDATE_BUNDLE" \
@@ -97,7 +98,7 @@ PYTHONDONTWRITEBYTECODE=1 "$PYTHON" training/build_traversability_review_bundle.
     --require-cuda
 
 echo "[4/7] Selecting 100 new images and building the CVAT bundle"
-PYTHONDONTWRITEBYTECODE=1 "$PYTHON" training/build_traversability_annotation_expansion.py \
+PYTHONDONTWRITEBYTECODE=1 "$PYTHON" research/training/build_traversability_annotation_expansion.py \
     --source-pseudo-bundle "$CANDIDATE_BUNDLE" \
     --existing-pilot "$EXISTING_PILOT" \
     --output-dir "$OUTPUT_DIR" \

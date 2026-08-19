@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+RESEARCH_ROOT="$PROJECT_ROOT/research"
 BUNDLE_ROOT="${BUNDLE_ROOT:-$HOME/datasets/generated/traversability_dataset_v1/annotation_100_v1}"
 CVAT_EXPORT="${CVAT_EXPORT:-$BUNDLE_ROOT/traversability_annotation_100_reviewed.zip}"
 OUTPUT_DIR="${OUTPUT_DIR:-$BUNDLE_ROOT/reviewed_import}"
@@ -58,14 +59,14 @@ print(digest.hexdigest())
 PY
 }
 
-cd "$ROOT_DIR"
+cd "$PROJECT_ROOT"
 before_git_status="$(git status --porcelain)"
 
 echo "[1/6] Inspecting CLI interfaces and running focused tests"
-"$PYTHON" training/import_cvat_traversability_masks.py --help >/dev/null
-"$PYTHON" training/validate_traversability_dataset_v1.py --help >/dev/null
+"$PYTHON" research/training/import_cvat_traversability_masks.py --help >/dev/null
+"$PYTHON" research/training/validate_traversability_dataset_v1.py --help >/dev/null
 PYTHONDONTWRITEBYTECODE=1 "$PYTHON" -m pytest \
-    -p no:cacheprovider -q tests/test_traversability_annotation.py
+    -p no:cacheprovider -q research/tests/test_traversability_annotation.py
 
 echo "[2/6] Recording immutable input fingerprints"
 before_dataset="$(tree_fingerprint "$DATASET_ROOT")"
@@ -73,14 +74,14 @@ before_pilot="$(tree_fingerprint "$APPROVED_PILOT")"
 before_zip="$(sha256sum "$CVAT_EXPORT" | awk '{print $1}')"
 
 echo "[3/6] Importing 100 SegmentationClass masks by label name"
-PYTHONDONTWRITEBYTECODE=1 "$PYTHON" training/import_cvat_traversability_masks.py \
+PYTHONDONTWRITEBYTECODE=1 "$PYTHON" research/training/import_cvat_traversability_masks.py \
     --bundle "$BUNDLE_ROOT" \
     --cvat-export "$CVAT_EXPORT" \
     --output-dir "$OUTPUT_DIR" \
     --expected-count "$EXPECTED_COUNT"
 
 echo "[4/6] Running the strict validator independently"
-PYTHONDONTWRITEBYTECODE=1 "$PYTHON" training/validate_traversability_dataset_v1.py \
+PYTHONDONTWRITEBYTECODE=1 "$PYTHON" research/training/validate_traversability_dataset_v1.py \
     --bundle "$BUNDLE_ROOT" \
     --masks-dir "$OUTPUT_DIR/masks" \
     --report-path "$OUTPUT_DIR/validation_report.json"

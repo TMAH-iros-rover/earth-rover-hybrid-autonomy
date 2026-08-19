@@ -176,10 +176,9 @@ def test_heading_outlier_burst_is_held_out_and_does_not_flip_fused_heading() -> 
     # flipped ~171 deg every 10-35s while the rover sat perfectly still
     # (compass/magnetometer fault). Before the outlier gate, Kalman gain
     # alone pulled the fused heading to follow every flip within one
-    # update. A burst shorter than heading_outlier_confirm_streak must now
-    # be held out entirely.
+    # update. Outliers must be held out regardless of how long they persist.
     clock = Clock()
-    filt = ekf(clock, origin_lock_fix_count=1, heading_outlier_confirm_streak=20)
+    filt = ekf(clock, origin_lock_fix_count=1, heading_recovery_streak=3)
     filt.observe_gps_heading(37.0, 127.0, 176.0)
 
     for _ in range(10):
@@ -191,22 +190,30 @@ def test_heading_outlier_burst_is_held_out_and_does_not_flip_fused_heading() -> 
     assert filt.gyro_trusted  # the bad reading must not poison gyro trust
 
 
-def test_persistent_heading_outlier_is_accepted_once_gyro_is_untrusted() -> None:
-    # A strike count alone must not force-accept while gyro is trusted (a
-    # live rotation test showed this snaps onto whatever the rejected
-    # reading happens to be at that moment -- exactly as likely to be the
-    # fault as the truth, since gyro is meanwhile dead-reckoning state
-    # toward the truth on its own and would otherwise catch up normally).
-    # Once gyro genuinely can't vouch either way, the gate must not hold a
-    # sustained change out forever -- confirm_streak rejects force it
-    # through.
+def test_wrapped_52_degree_live_jump_is_rejected_with_deployment_threshold() -> None:
+    clock = Clock()
+    filt = ekf(
+        clock,
+        origin_lock_fix_count=1,
+        heading_outlier_reject_deg=35.0,
+    )
+    filt.observe_gps_heading(37.0, 127.0, 310.0)
+    clock.value += 0.5
+    filt.observe_gps_heading(37.0, 127.0, 2.0)
+
+    assert filt.heading_valid is False
+    assert filt.current_estimate()[2] == pytest.approx(310.0)
+    assert filt.status()["heading_status_reason"] == "HEADING_OUTLIER_REJECTED"
+
+
+def test_stable_heading_outlier_reanchors_when_gyro_is_untrusted() -> None:
     random.seed(4)
     clock = Clock()
     filt = ekf(
         clock,
         origin_lock_fix_count=1,
         gyro_disagreement_window=10,
-        heading_outlier_confirm_streak=5,
+        heading_recovery_streak=3,
     )
     heading = 0.0
     for _ in range(15):
@@ -216,29 +223,125 @@ def test_persistent_heading_outlier_is_accepted_once_gyro_is_untrusted() -> None
         filt.observe_gps_heading(37.0, 127.0, heading % 360.0)
     assert not filt.gyro_trusted  # sanity check: this run should have disabled it
 
-    for _ in range(10):
+    for _ in range(3):
         clock.value += 0.5
         filt.observe_gps_heading(37.0, 127.0, 176.0)
 
     _, _, fused_heading = filt.current_estimate()
-    assert abs(fused_heading - 176.0) < 5.0
+    assert fused_heading == pytest.approx(176.0)
+    assert filt.heading_valid is True
+    assert (
+        filt.status()["heading_status_reason"]
+        == "HEADING_REACQUIRED_GYRO_UNTRUSTED"
+    )
+    assert filt.consume_heading_reanchor() is True
+    assert filt.consume_heading_reanchor() is False
+    assert filt.status()["heading_outlier_streak"] == 0
 
 
-def test_persistent_heading_outlier_hits_hard_cap_when_gyro_never_corroborates() -> None:
-    # Last-resort safety valve: even with gyro nominally trusted the whole
-    # time (never fed anything, so never challenged either), a genuinely
-    # sustained heading change must not be held out forever.
+def test_live_161_to_355_heading_recovers_only_after_stable_outlier_streak() -> None:
     clock = Clock()
-    filt = ekf(clock, origin_lock_fix_count=1, heading_outlier_confirm_streak=5)
+    filt = ekf(
+        clock,
+        origin_lock_fix_count=1,
+        heading_outlier_reject_deg=35.0,
+        heading_recovery_streak=3,
+        heading_recovery_max_delta_deg=8.0,
+    )
+    filt.observe_gps_heading(37.0, 127.0, 161.0)
+    filt._gyro_trusted = False
+
+    for expected_count, heading in ((1, 355.0), (2, 357.0)):
+        clock.value += 0.5
+        filt.observe_gps_heading(37.0, 127.0, heading)
+        assert filt.heading_valid is False
+        assert filt.current_estimate()[2] == pytest.approx(161.0)
+        assert filt.status()["heading_recovery_count"] == expected_count
+
+    clock.value += 0.5
+    filt.observe_gps_heading(37.0, 127.0, 356.0)
+    assert filt.heading_valid is True
+    assert filt.current_estimate()[2] == pytest.approx(356.0)
+    assert (
+        filt.status()["heading_status_reason"]
+        == "HEADING_REACQUIRED_GYRO_UNTRUSTED"
+    )
+
+
+def test_untrusted_heading_does_not_reanchor_from_inconsistent_outliers() -> None:
+    clock = Clock()
+    filt = ekf(
+        clock,
+        origin_lock_fix_count=1,
+        heading_outlier_reject_deg=35.0,
+        heading_recovery_streak=3,
+        heading_recovery_max_delta_deg=8.0,
+    )
+    filt.observe_gps_heading(37.0, 127.0, 161.0)
+    filt._gyro_trusted = False
+
+    for heading in (355.0, 330.0, 5.0, 350.0):
+        clock.value += 0.5
+        filt.observe_gps_heading(37.0, 127.0, heading)
+        assert filt.heading_valid is False
+        assert filt.status()["heading_recovery_count"] == 1
+
+    assert filt.current_estimate()[2] == pytest.approx(161.0)
+
+
+def test_persistent_heading_outlier_has_no_hard_cap_force_accept() -> None:
+    clock = Clock()
+    filt = ekf(clock, origin_lock_fix_count=1, heading_recovery_streak=3)
     filt.observe_gps_heading(37.0, 127.0, 176.0)
 
-    for _ in range(20):  # well past confirm_streak(5) * hard-cap multiplier
+    for _ in range(20):
         clock.value += 0.5
         filt.observe_gps_heading(37.0, 127.0, 5.0)
 
     _, _, heading = filt.current_estimate()
-    assert abs(heading - 5.0) < 5.0
+    assert abs(heading - 176.0) < 5.0
+    assert filt.heading_valid is False
     assert filt.gyro_trusted  # never challenged -- still nominally trusted
+
+
+def test_heading_recovers_only_after_consecutive_accepted_measurements() -> None:
+    clock = Clock()
+    filt = ekf(clock, origin_lock_fix_count=1, heading_recovery_streak=3)
+    filt.observe_gps_heading(37.0, 127.0, 176.0)
+    clock.value += 0.5
+    filt.observe_gps_heading(37.0, 127.0, 5.0)
+    assert filt.heading_valid is False
+
+    for expected_count in (1, 2):
+        clock.value += 0.5
+        filt.observe_gps_heading(37.0, 127.0, 176.0)
+        assert filt.heading_valid is False
+        assert filt.status()["heading_recovery_count"] == expected_count
+    clock.value += 0.5
+    filt.observe_gps_heading(37.0, 127.0, 176.0)
+    assert filt.heading_valid is True
+    assert filt.status()["heading_status_reason"] == "OK"
+
+
+def test_heading_does_not_recover_from_mutually_inconsistent_measurements() -> None:
+    clock = Clock()
+    filt = ekf(
+        clock,
+        origin_lock_fix_count=1,
+        heading_outlier_reject_deg=60.0,
+        heading_recovery_streak=3,
+        heading_recovery_max_delta_deg=8.0,
+    )
+    filt.observe_gps_heading(37.0, 127.0, 0.0)
+    clock.value += 0.5
+    filt.observe_gps_heading(37.0, 127.0, 100.0)
+    assert filt.heading_valid is False
+
+    for heading in (20.0, 35.0, 10.0, 30.0):
+        clock.value += 0.5
+        filt.observe_gps_heading(37.0, 127.0, heading)
+        assert filt.heading_valid is False
+        assert filt.status()["heading_recovery_count"] == 1
 
 
 def test_gyro_corroborated_large_heading_change_is_accepted_immediately() -> None:
@@ -299,7 +402,8 @@ def test_config_from_dict_defaults_are_sane_and_validate() -> None:
         {"gyro_disagreement_window": 1},
         {"gyro_disagreement_threshold": 1.5},
         {"heading_outlier_reject_deg": 0.0},
-        {"heading_outlier_confirm_streak": 0},
+        {"heading_recovery_streak": 0},
+        {"heading_recovery_max_delta_deg": 0.0},
     ],
 )
 def test_config_validate_rejects_bad_values(overrides: dict) -> None:

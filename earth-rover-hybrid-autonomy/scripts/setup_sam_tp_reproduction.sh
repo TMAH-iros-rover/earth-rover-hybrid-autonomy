@@ -12,6 +12,7 @@ UPSTREAM_URL="https://github.com/jiaming-ai/GENIE-SAMTP.git"
 UPSTREAM_BRANCH="master"
 UPSTREAM_COMMIT="728aee296cf44288356de683b1948f18b05917d6"
 CHECKPOINT_RELATIVE="sam2_logs/configs/sam2.1_training_tiny/sam2_training_custom2_freezeNoneNone_f57.yaml/checkpoints/checkpoint_2.pt"
+TRANSFORMERS_VERSION="5.4.0"
 CHECKPOINT_URL="https://drive.google.com/drive/folders/190yHH-TcfQVoByZeB1809sPIR62CsBD1?dmr=1&ec=wgc-drive-hero-goto"
 
 if ! command -v nvidia-smi >/dev/null 2>&1; then
@@ -101,6 +102,9 @@ EOF
   env_python -m pip install -r "$UPSTREAM_ROOT/requirements.txt"
 fi
 env_python -c "import sys; assert sys.version_info[:2] == (3, 10), sys.version"
+env_python -m pip install "transformers==$TRANSFORMERS_VERSION"
+env_python -c \
+  "import transformers; assert transformers.__version__ == '$TRANSFORMERS_VERSION', transformers.__version__"
 
 if ! env_python -c "import torch, torchvision" >/dev/null 2>&1; then
   if [[ "${INSTALL_TORCH:-false}" != "true" ]]; then

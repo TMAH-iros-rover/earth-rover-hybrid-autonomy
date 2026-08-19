@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+RESEARCH_ROOT="$PROJECT_ROOT/research"
 SOURCE_BUNDLE="${SOURCE_BUNDLE:-$HOME/datasets/review_bundles/manual_candidates_v2}"
 OUTPUT_DIR="${OUTPUT_DIR:-$HOME/datasets/review_bundles/manual_candidates_v2_selected}"
 SELECTION=(1 3 8 9 14 15 18 19 22 27 30 32 34 35 41 46 60 63 68 75 77 88 90 97 100 113 124 154 160 166 169 177 180)
@@ -46,17 +47,17 @@ print(digest.hexdigest())
 PY
 }
 
-cd "$ROOT_DIR"
+cd "$PROJECT_ROOT"
 before_git_status="$(git status --porcelain)"
 before_source="$(tree_fingerprint "$SOURCE_BUNDLE")"
 
 echo "[1/4] Running focused manual-selection tests"
 PYTHONDONTWRITEBYTECODE=1 "$PYTHON" -m pytest -p no:cacheprovider -q \
-    tests/test_select_manual_candidates_v2.py \
-    tests/test_manual_candidate_sampling.py
+    research/tests/test_select_manual_candidates_v2.py \
+    research/tests/test_manual_candidate_sampling.py
 
 echo "[2/4] Selecting and copying the reviewed 33 candidates"
-PYTHONDONTWRITEBYTECODE=1 "$PYTHON" training/select_manual_candidates_v2.py \
+PYTHONDONTWRITEBYTECODE=1 "$PYTHON" research/training/select_manual_candidates_v2.py \
     --source-bundle "$SOURCE_BUNDLE" \
     --output-dir "$OUTPUT_DIR" \
     --selection "${SELECTION[@]}"

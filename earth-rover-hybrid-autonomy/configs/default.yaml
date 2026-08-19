@@ -11,6 +11,25 @@ sdk:
   request_timeout_sec: 1.0
   max_consecutive_failures: 3
 
+sam_tp:
+  # Live default: fine-tuned Hugging Face SAM2 checkpoint.
+  model_config: "sam2/configs/sam2.1_inference_tiny/sam2.1_custom2.yaml"
+  checkpoint: "sam2_logs/configs/sam2.1_training_tiny/sam2_training_custom2_freezeNoneNone_f57.yaml/checkpoints/best_sam_tp.pt"
+  expected_checkpoint_sha256: "99f0efab7b40d532e31909a77f1e9c4d1a0be3a534b96c7d769850cc046b951d"
+
+  # Original GENIE-SAMTP rollback model:
+  # checkpoint: "sam2_logs/configs/sam2.1_training_tiny/sam2_training_custom2_freezeNoneNone_f57.yaml/checkpoints/checkpoint_2.pt"
+  # expected_checkpoint_sha256: "2607fd6049d37f17fe96132cf35459f7e0a895107632410637d812756e3f9adb"
+
+camera_calibration:
+  # Only consulted when planner.geometry_mode is metric_projected (see
+  # planner section below). null here matches this profile's
+  # image_heuristic default -- replay/comparison tooling that loads only
+  # this file never needs a calibration file.
+  # See docs/calibration/CALIBRATION.md and
+  # configs/calibration/mission1_camera.EXAMPLE_TEMPLATE.yaml.
+  path: null
+
 control:
   linear_min: -0.25
   linear_max: 0.35
@@ -76,6 +95,10 @@ navigation:
   # search_rotate_angular, but well below the noise observed above -- set
   # to null to disable.
   max_heading_rate_deg_per_sec: 120.0
+  # Cap the elapsed time used by the route-level rate guard. A long network
+  # pause must not make the same impossible one-sample jump become valid.
+  # This matches the default 2 Hz telemetry polling interval.
+  max_heading_sample_interval_sec: 0.5
 
 localization:
   # Fuses raw GPS + the pre-fused `orientation` heading (+ gyro yaw rate)
@@ -130,21 +153,40 @@ localization:
   # position noise). A reading whose innovation exceeds this many degrees
   # is held out of the filter (not fused, not counted as gyro
   # disagreement) instead of being trusted.
-  heading_outlier_reject_deg: 60.0
-  # Once gyro fusion is untrusted/disabled (so it can no longer vouch for
-  # a rejected reading either way), this many consecutive rejections force
-  # the most recent one through rather than holding it out forever. At the
-  # SDK's ~2 Hz telemetry cadence this is ~10s. While gyro IS trusted, a
-  # strike count alone is deliberately not enough -- see
-  # localization.py:GpsHeadingEkf._update_heading.
-  heading_outlier_confirm_streak: 20
+  # The latest live run accepted a 310 -> 2 deg one-sample jump because its
+  # wrapped 52 deg innovation was just below the old 60 deg threshold. Real
+  # commanded rotations in that run changed by much smaller increments.
+  heading_outlier_reject_deg: 35.0
+  # Never force-accept a persistent outlier. After any rejected or missing
+  # heading, navigation remains invalid until this many consecutive normal
+  # measurements arrive; Mission1 stops while heading_valid=false.
+  heading_recovery_streak: 3
+  # Recovery samples must also agree with each other. Mission1 is stopped
+  # while invalid, so a stable rover should not move more than this between
+  # consecutive 2 Hz heading measurements.
+  heading_recovery_max_delta_deg: 8.0
 
 planner:
   mode: motion_primitives
+  # image_heuristic: legacy/replay image-space curves with no relationship
+  # to real rover geometry or camera calibration (candidate_headings_deg
+  # below). metric_projected: project real rover-frame footprints through
+  # camera_calibration.path above; requires horizon_m/sample_interval_m/
+  # rover_width_m/safety_margin_m/curvatures and a validated calibration
+  # file, and fails closed (stops) without one. This profile stays
+  # image_heuristic so replay/comparison tooling that loads only this file
+  # keeps working without a calibration file; configs/mission1_live.yaml
+  # overrides this to metric_projected.
+  geometry_mode: image_heuristic
   # Finer steps near center let the planner express a small correction
   # (e.g. +5-10 deg) instead of jumping straight to +/-15, which was causing
   # it to commit to a much sharper turn than the situation needed.
-  candidate_headings_deg: [-45, -30, -20, -10, -5, 0, 5, 10, 20, 30, 45]
+  # The live rover cannot safely execute a one-tick jump to +/-45 deg. A
+  # single near-field score glitch previously hard-rejected every candidate
+  # except -45 deg, then continuity held that wall-side turn for over a
+  # minute. Keep local corrections bounded; if every +/-30 deg corridor is
+  # unsafe, stop/re-evaluate instead of committing an extreme turn.
+  candidate_headings_deg: [-30, -20, -10, -5, 0, 5, 10, 20, 30]
   traversability_weight: 1.0
   goal_heading_weight: 0.7
   continuity_weight: 0.45
@@ -195,6 +237,11 @@ planner:
   # in place. Back to requiring 2 consecutive ticks of agreement before
   # switching; min_candidate_commit_sec above still keeps reaction fast.
   switch_confirm_count: 2
+  # If the active corridor becomes unsafe, stop first and require multiple
+  # consistent frames before moving to an adjacent candidate. Never jump
+  # farther than one 10-degree candidate step while driving.
+  unsafe_switch_confirm_count: 3
+  max_candidate_switch_deg: 10.0
   corridor_half_width_ratio: 0.025
   maximum_visual_heading_deg: 55.0
   debug_candidate_scores: true

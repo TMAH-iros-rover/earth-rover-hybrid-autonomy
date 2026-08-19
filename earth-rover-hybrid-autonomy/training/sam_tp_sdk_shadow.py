@@ -12,6 +12,7 @@ import numpy as np
 
 from earth_rover.core.types import FrameData, RoverData
 from earth_rover.navigation.localization import GpsHeadingEkf
+from earth_rover.perception.camera_calibration import CameraCalibration
 from earth_rover.navigation.checkpoint_route import (
     CheckpointRoutePlanner,
     GlobalRouteState,
@@ -54,6 +55,9 @@ _PROVISIONAL_PHASE1_TRAJECTORIES = ConstantCurvatureTrajectorySampler(
 class ShadowStep:
     dashboard_bgr: np.ndarray
     overlay_bgr: np.ndarray
+    source_bgr: np.ndarray
+    raw_logits: np.ndarray
+    score_map: np.ndarray
     record: dict[str, object]
 
 
@@ -75,6 +79,8 @@ def run_shadow_step(
     local_planner: MotionPrimitivePlanner | None = None,
     heading_offset_deg: float = 0.0,
     localizer: GpsHeadingEkf | None = None,
+    checkpoint_metadata: dict[str, object] | None = None,
+    calibration: CameraCalibration | None = None,
 ) -> tuple[ShadowStep, RoverData | None]:
     """Fetch one live frame, infer once, and return a read-only dashboard step.
 
@@ -116,6 +122,12 @@ def run_shadow_step(
     image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
     if localizer is not None and localizer.is_locked:
         fused_lat, fused_lon, fused_heading_deg = localizer.current_estimate()
+        if not bool(getattr(localizer, "heading_valid", True)):
+            fused_heading_deg = None
+        elif route_planner is not None:
+            consume_reanchor = getattr(localizer, "consume_heading_reanchor", None)
+            if callable(consume_reanchor) and consume_reanchor():
+                route_planner.reanchor_heading()
     elif telemetry is not None:
         fused_lat = telemetry.latitude
         fused_lon = telemetry.longitude
@@ -157,6 +169,7 @@ def run_shadow_step(
             ),
             timestamp=float(frame.timestamp),
             navigation=navigation_record(navigation),
+            calibration=calibration,
         )
         image_path = primitive_plan.image_path
         planner_latency_sec = monotonic() - planner_started_monotonic
@@ -240,8 +253,21 @@ def run_shadow_step(
         "score_std": float(prediction.traversability_score.std()),
         "adapter_confidence": traversability.confidence,
         "candidate_trajectory_count": len(phase1.trajectories),
-        "trajectory_geometry_only": True,
-        "camera_projection_applied": False,
+        "trajectory_geometry_only": not (
+            primitive_plan is not None and primitive_plan.camera_projection_applied
+        ),
+        "camera_projection_applied": (
+            primitive_plan.camera_projection_applied if primitive_plan is not None else False
+        ),
+        "geometry_mode": (
+            primitive_plan.geometry_mode if primitive_plan is not None else "image_heuristic"
+        ),
+        "calibration_id": (
+            primitive_plan.calibration_id if primitive_plan is not None else None
+        ),
+        "calibration_sha256_prefix": (
+            primitive_plan.calibration_sha256_prefix if primitive_plan is not None else None
+        ),
         "image_path_valid": image_path.valid,
         "image_path_reason": image_path.reason,
         "image_path_mean_score": image_path.mean_score,
@@ -281,12 +307,15 @@ def run_shadow_step(
         "using_held_plan": (
             primitive_plan.using_held_plan if primitive_plan is not None else False
         ),
-        "image_path_metric_calibrated": False,
+        "image_path_metric_calibrated": (
+            primitive_plan.image_path_metric_calibrated if primitive_plan is not None else False
+        ),
         "image_path_experimental_control_input": True,
         "prediction_valid": not frame_stale,
         "telemetry_valid": telemetry_error is None and not telemetry_stale,
         "shadow_state": shadow_state,
         "checkpoint_sha256": checkpoint_sha256,
+        "checkpoint": checkpoint_metadata,
         "telemetry": telemetry_record(telemetry, fresh=fetch_telemetry),
         "navigation_heading_offset_deg": heading_offset_deg,
         "navigation": navigation_record(navigation),
@@ -312,7 +341,14 @@ def run_shadow_step(
         prediction.traversability_score,
         image_path,
     )
-    return ShadowStep(dashboard, overlay, record), telemetry
+    return ShadowStep(
+        dashboard_bgr=dashboard,
+        overlay_bgr=overlay,
+        source_bgr=image_bgr,
+        raw_logits=prediction.raw_logits,
+        score_map=prediction.traversability_score,
+        record=record,
+    ), telemetry
 
 
 def _timezone_offset_hours(
@@ -414,13 +450,17 @@ def localization_record(localizer: GpsHeadingEkf | None) -> dict[str, object] | 
     if localizer is None:
         return None
     lat, lon, heading_deg = localizer.current_estimate()
-    return {
+    record = {
         "locked": localizer.is_locked,
         "fused_latitude": lat,
         "fused_longitude": lon,
         "fused_heading_deg": heading_deg,
         "gyro_trusted": localizer.gyro_trusted,
     }
+    status = getattr(localizer, "status", None)
+    if callable(status):
+        record.update(status())
+    return record
 
 
 def navigation_record(state: GlobalRouteState | None) -> dict[str, object] | None:
@@ -509,7 +549,12 @@ def compose_shadow_dashboard(
     state_color = (70, 220, 70) if state == "CLEAR" else (40, 80, 240)
     cv2.putText(
         canvas,
-        f"READ-ONLY SHADOW | {state} | command_transmitted=false",
+        (
+            f"READ-ONLY SHADOW | {state} | "
+            f"{record.get('geometry_mode', 'image_heuristic')} | "
+            f"cal={'OK' if record.get('image_path_metric_calibrated') else 'INVALID'} | "
+            "command_transmitted=false"
+        ),
         (12, 53),
         cv2.FONT_HERSHEY_SIMPLEX,
         0.55,
@@ -539,7 +584,7 @@ def compose_shadow_dashboard(
             f"sdk_ts={record['sdk_frame_timestamp']}  "
             f"score min/mean/max={float(record['score_min']):.3f}/"
             f"{float(record['score_mean']):.3f}/{float(record['score_max']):.3f}  "
-            f"path={record['image_path_reason']}"
+            f"path={_dashboard_path_reason(record)}"
         ),
         12,
         footer_y + 28,
@@ -554,14 +599,37 @@ def compose_shadow_dashboard(
             f"battery={telemetry.battery}  signal={telemetry.signal_level}"
         )
     _text(canvas, telemetry_text, 12, footer_y + 56, 0.50)
+    checkpoint_meta = record.get("checkpoint") or {}
+    checkpoint_label = (
+        f"checkpoint={checkpoint_meta.get('filename', '?')} "
+        f"sha256={checkpoint_meta.get('sha256_prefix', str(record['checkpoint_sha256'])[:16])} "
+        f"backend={checkpoint_meta.get('backend', '?')}"
+        if checkpoint_meta
+        else f"checkpoint={str(record['checkpoint_sha256'])[:16]}"
+    )
     _text(
         canvas,
-        f"checkpoint={str(record['checkpoint_sha256'])[:16]}  q/esc: quit",
+        f"{checkpoint_label}  q/esc: quit",
         12,
         footer_y + 84,
         0.48,
     )
     return canvas
+
+
+def _dashboard_path_reason(record: dict[str, object]) -> str:
+    planner = record.get("planner")
+    if isinstance(planner, dict):
+        candidates = planner.get("candidate_scores")
+        if isinstance(candidates, list) and candidates:
+            reject_reasons = {
+                candidate.get("reject_reason")
+                for candidate in candidates
+                if isinstance(candidate, dict) and candidate.get("hard_rejected") is True
+            }
+            if len(reject_reasons) == 1:
+                return str(next(iter(reject_reasons)))
+    return str(record.get("image_path_reason", "UNKNOWN"))
 
 
 def write_shadow_summary(
@@ -570,6 +638,7 @@ def write_shadow_summary(
     failures: list[dict[str, object]],
     checkpoint_path: str | Path,
     checkpoint_sha256: str,
+    checkpoint_metadata: dict[str, object] | None = None,
 ) -> Path:
     output = Path(output_dir)
     values = [float(item["end_to_end_latency_ms"]) for item in records]
@@ -588,6 +657,7 @@ def write_shadow_summary(
         "effective_fps": records[-1]["effective_fps"] if records else 0.0,
         "checkpoint_path": str(Path(checkpoint_path).expanduser().resolve()),
         "checkpoint_sha256": checkpoint_sha256,
+        "checkpoint": checkpoint_metadata,
         "sdk_allowed_read_endpoints": [
             "/v2/front",
             "/front",

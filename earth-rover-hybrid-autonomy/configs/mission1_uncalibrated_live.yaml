@@ -1,0 +1,159 @@
+# Temporary attended-driving profile for sites where a physical camera
+# calibration target is unavailable. This deliberately uses the legacy
+# image-space planner: its paths are not metric rover footprints, so keep the
+# command envelope narrow and do not use this profile for unattended driving.
+
+camera_calibration:
+  path: null
+
+urban:
+  # The rover's current stationary GPS fix is about 6.8 m from checkpoint 1,
+  # while checkpoint 2 is about 25 m away. Treat checkpoint 1 as the launch
+  # checkpoint without restoring the old 15 m radius that could skip nearby
+  # checkpoints.
+  waypoint_switch_radius_m: 8.0
+
+mission1_autonomy:
+  require_metric_projection: false
+  loop_hz: 5.0
+  sam_status_url: "http://127.0.0.1:8001/status"
+  sam_timeout_sec: 0.5
+  maximum_sam_age_sec: 2.5
+
+  # Maintain the measured drive deadzone while capping the test speed.
+  base_linear: 0.12
+  minimum_linear: 0.12
+  max_linear: 0.12
+  heading_kp: 0.30
+  max_angular: 0.15
+  angular_deadband: 0.03
+
+  # Do not rotate in place from an uncalibrated image-space path. Large goal
+  # errors stop and wait for operator intervention instead.
+  stop_forward_heading_deg: 35.0
+  rotate_to_goal_heading_deg: 170.0
+  rotate_exit_threshold_deg: 20.0
+  rotate_to_goal_angular: 0.15
+  # The live rover did not move at sdk_angular=0.066 (all wheel RPMs stayed
+  # zero). Keep rotate-to-goal commands above the observed steering deadzone.
+  minimum_rotate_angular: 0.12
+  enable_search_rotate: false
+  search_rotate_angular: 0.15
+  search_rotate_timeout_sec: 10.0
+
+  # ROTATE_ESCAPE: bounded stop -> rotate(pulse) -> replan recovery driven by
+  # the planner's independent LEFT/RIGHT side_sector evidence (see planner.
+  # side_sector_* below), used instead of enable_search_rotate above because
+  # it can actually tell left from right when a wide near obstacle
+  # contaminates every forward candidate's own near-field score identically.
+  # side_sector_enabled and enable_rotate_escape both default to False on
+  # their dataclasses and are enabled only by attended live profiles.
+  enable_rotate_escape: true
+  rotate_escape_angular: 0.15
+  # Auxiliary minimum dwell only; real stop confirmation additionally
+  # requires rotate_escape_stationary_confirm_samples of fresh, valid,
+  # below-threshold speed/rpm telemetry (see stationary_* below) -- ticks
+  # alone are never sufficient to start rotating.
+  rotate_escape_stop_confirm_ticks: 2
+  rotate_escape_stationary_speed_threshold: 0.03
+  rotate_escape_stationary_rpm_threshold: 1.0
+  rotate_escape_stationary_confirm_samples: 2
+  rotate_escape_stop_timeout_sec: 3.0
+  # After stationary telemetry is confirmed, require two new SAM frames to
+  # agree on the same escape side before the first rotation pulse.
+  rotate_escape_direction_confirm_frames: 2
+  # Short pulses with a mandatory settle + fresh-SAM-frame replan check
+  # between each one, instead of one continuous rotation -- see
+  # mission1_controller.py's ROTATE_PULSE/ROTATE_SETTLE phases. These are
+  # conservative placeholders, not derived from any measured turn angle
+  # (no camera calibration exists to make that claim).
+  rotate_escape_pulse_sec: 0.5
+  rotate_escape_settle_sec: 0.5
+  rotate_escape_max_pulses: 6
+  rotate_escape_max_total_sec: 8.0
+  rotate_escape_safe_frame_confirm_count: 3
+  rotate_escape_cooldown_sec: 5.0
+
+  minimum_path_score: 0.55
+  checkpoint_report_cooldown_sec: 2.0
+  checkpoint_transition_stop_sec: 0.4
+  target_sequence_confirm_frames: 3
+  transient_invalid_grace_sec: 0.8
+  max_plan_age_sec: 1.5
+  path_invalid_grace_ticks: 2
+  # Stop on the first unsafe switch frame, then require three distinct SAM
+  # frames to be safe before sending another positive command.
+  path_recovery_confirm_frames: 3
+  held_path_linear_scale: 0.45
+  partial_path_linear_scale: 0.60
+  relaxed_path_linear_scale: 0.75
+  confidence_slowdown_gain: 0.70
+  curvature_slowdown_gain: 0.65
+
+control:
+  linear_min: 0.0
+  linear_max: 0.12
+  angular_min: -0.15
+  angular_max: 0.15
+  command_smoothing_alpha: 0.25
+  max_linear_delta_per_sec: 0.30
+  max_angular_delta_per_sec: 0.30
+  reverse_angular_sign_slowdown: true
+  angular_deadband: 0.03
+
+navigation:
+  # This profile caps steering at 0.15, so a heading change faster than
+  # 30 deg/s is not physically plausible during the test. Reject it before
+  # it can reverse the GPS goal direction.
+  heading_filter_alpha: 0.2
+  max_heading_rate_deg_per_sec: 30.0
+  max_heading_sample_interval_sec: 0.5
+
+localization:
+  # Keep the innovation gate wide enough for filter lag during a confirmed
+  # physical turn. The separate 30 deg/s route gate rejects impossible jumps.
+  heading_outlier_reject_deg: 35.0
+  heading_recovery_streak: 3
+  heading_recovery_max_delta_deg: 8.0
+
+planner:
+  mode: motion_primitives
+  geometry_mode: image_heuristic
+  candidate_headings_deg: [-30, -20, -10, -5, 0, 5, 10, 20, 30]
+  traversability_weight: 1.0
+  goal_heading_weight: 0.85
+  continuity_weight: 0.60
+  curvature_weight: 0.20
+  near_field_risk_weight: 1.5
+  near_field_soft_risk_weight: 0.5
+  path_score_threshold: 0.55
+  near_field_stop_threshold: 0.65
+  near_field_percentile: 10
+  full_path_percentile: 15
+  candidate_score_ema_alpha: 0.30
+  min_candidate_commit_sec: 0.50
+  transient_invalid_grace_sec: 0.8
+  max_plan_age_sec: 1.5
+  switch_score_margin: 0.08
+  switch_confirm_count: 3
+  unsafe_switch_confirm_count: 3
+  max_candidate_switch_deg: 10.0
+  corridor_half_width_ratio: 0.025
+  maximum_visual_heading_deg: 30.0
+  debug_candidate_scores: true
+
+  # side_sector_*: independent LEFT/RIGHT perception used only to pick a
+  # rotate-escape direction when every forward candidate above is hard
+  # rejected (see ROTATE_ESCAPE under mission1_autonomy). Does not affect
+  # forward candidate scoring or near_field_stop_threshold above.
+  side_sector_enabled: true
+  side_sector_top_ratio: 0.45
+  side_sector_bottom_exclude_ratio: 0.08
+  side_sector_left_width_ratio: 0.30
+  side_sector_right_width_ratio: 0.30
+  side_sector_low_percentile: 20
+  side_sector_traversable_score_threshold: 0.55
+  side_sector_min_traversable_ratio: 0.55
+  side_sector_min_valid_pixel_ratio: 0.4
+  side_sector_stop_score: 0.5
+  side_sector_margin: 0.12

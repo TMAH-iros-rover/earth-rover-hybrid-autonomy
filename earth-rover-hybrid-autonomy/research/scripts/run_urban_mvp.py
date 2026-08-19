@@ -32,7 +32,7 @@ from earth_rover.utils.timing import sleep_to_maintain_loop_hz
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default="configs/default.yaml")
-    parser.add_argument("--override", default="configs/urban.yaml")
+    parser.add_argument("--override", default="research/configs/urban.yaml")
     args = parser.parse_args()
 
     config = load_config(ROOT / args.config, ROOT / args.override)

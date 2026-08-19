@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-WORKSPACE_ROOT="$(cd "$PROJECT_ROOT/../.." && pwd)"
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+RESEARCH_ROOT="$PROJECT_ROOT/research"
+WORKSPACE_ROOT="$(cd "$PROJECT_ROOT/.." && pwd)"
 UPSTREAM_ROOT="${UPSTREAM_ROOT:-$WORKSPACE_ROOT/external/GENIE-SAMTP}"
 VENV_PATH="${VENV_PATH:-$WORKSPACE_ROOT/external/venvs/sam_tp_repro}"
 PYTHON="${PYTHON:-$VENV_PATH/bin/python}"
-CONFIG="${CONFIG:-$PROJECT_ROOT/configs/sam_tp_reproduction.yaml}"
+CONFIG="${CONFIG:-$RESEARCH_ROOT/configs/sam_tp_reproduction.yaml}"
 CHECKPOINT="${CHECKPOINT:-$UPSTREAM_ROOT/sam2_logs/configs/sam2.1_training_tiny/sam2_training_custom2_freezeNoneNone_f57.yaml/checkpoints/checkpoint_2.pt}"
 RUN_ID="${RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}"
 OUTPUT_DIR="${OUTPUT_DIR:-$HOME/datasets/review_bundles/sam_tp_phase1/$RUN_ID}"
@@ -46,14 +47,14 @@ PYTHONDONTWRITEBYTECODE=1 "$PYTHON" -m pytest -p no:cacheprovider -q \
   tests/test_sam_tp_sdk_shadow.py
 
 echo "[2/3] Strictly validating the official checkpoint"
-"$PYTHON" training/inspect_sam_tp_compatibility.py \
+"$PYTHON" research/training/inspect_sam_tp_compatibility.py \
   --reproduction-config "$CONFIG" \
   --upstream-root "$UPSTREAM_ROOT" \
   --checkpoint "$CHECKPOINT" \
   --output "$REPORT_DIR/compatibility_report.json"
 
 echo "[3/3] Creating the deterministic QuickTime-compatible Phase 1 video"
-"$PYTHON" training/run_sam_tp_video_review.py \
+"$PYTHON" research/training/run_sam_tp_video_review.py \
   --reproduction-config "$CONFIG" \
   --upstream-root "$UPSTREAM_ROOT" \
   --checkpoint "$CHECKPOINT" \

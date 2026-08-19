@@ -7,9 +7,16 @@ UPSTREAM_ROOT="${UPSTREAM_ROOT:-$WORKSPACE_ROOT/external/GENIE-SAMTP}"
 ENV_NAME="${ENV_NAME:-sam_tp_repro}"
 ENV_BACKEND="${ENV_BACKEND:-auto}"
 VENV_PATH="${VENV_PATH:-$WORKSPACE_ROOT/external/venvs/$ENV_NAME}"
-MODEL_CONFIG="${MODEL_CONFIG:-$UPSTREAM_ROOT/sam2/configs/sam2.1_inference_tiny/sam2.1_custom2.yaml}"
-CHECKPOINT="${CHECKPOINT:-$UPSTREAM_ROOT/sam2_logs/configs/sam2.1_training_tiny/sam2_training_custom2_freezeNoneNone_f57.yaml/checkpoints/checkpoint_2.pt}"
-EXPECTED_CHECKPOINT_SHA256="${EXPECTED_CHECKPOINT_SHA256:-2607fd6049d37f17fe96132cf35459f7e0a895107632410637d812756e3f9adb}"
+CONFIG="${CONFIG:-$PROJECT_ROOT/configs/default.yaml}"
+# The SDK shadow feeds Mission1 live control, so its default must match the
+# controller's live profile. Set MISSION_CONFIG='' explicitly only for an
+# offline/legacy image-heuristic experiment.
+MISSION_CONFIG="${MISSION_CONFIG-$PROJECT_ROOT/configs/mission1_live.yaml}"
+# Model selection defaults live in CONFIG under sam_tp. These optional
+# overrides keep one-command rollback and experiment launches available.
+MODEL_CONFIG="${MODEL_CONFIG:-}"
+CHECKPOINT="${CHECKPOINT:-}"
+EXPECTED_CHECKPOINT_SHA256="${EXPECTED_CHECKPOINT_SHA256:-}"
 RUN_ID="${RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}"
 OUTPUT_DIR="${OUTPUT_DIR:-$HOME/datasets/review_bundles/sam_tp_sdk_shadow/$RUN_ID}"
 TARGET_FPS="${TARGET_FPS:-4}"
@@ -24,6 +31,11 @@ DASHBOARD_HOST="${DASHBOARD_HOST:-127.0.0.1}"
 DASHBOARD_PORT="${DASHBOARD_PORT:-8001}"
 MISSION_ROUTE_LATEST_OVERRIDE="${MISSION_ROUTE_LATEST_OVERRIDE:-}"
 PLANNER_MODE="${PLANNER_MODE:-}"
+EVENT_CAPTURE="${EVENT_CAPTURE:-true}"
+CAPTURE_PRE_EVENT_FRAMES="${CAPTURE_PRE_EVENT_FRAMES:-8}"
+CAPTURE_POST_EVENT_FRAMES="${CAPTURE_POST_EVENT_FRAMES:-8}"
+CAPTURE_BASELINE_INTERVAL_FRAMES="${CAPTURE_BASELINE_INTERVAL_FRAMES:-40}"
+CAPTURE_QUEUE_SIZE="${CAPTURE_QUEUE_SIZE:-32}"
 
 if [[ "$ENV_BACKEND" == "auto" ]]; then
   if command -v conda >/dev/null 2>&1 \
@@ -50,11 +62,8 @@ else
 fi
 
 arguments=(
-  --config "$PROJECT_ROOT/configs/default.yaml"
+  --config "$CONFIG"
   --upstream-root "$UPSTREAM_ROOT"
-  --model-config "$MODEL_CONFIG"
-  --checkpoint "$CHECKPOINT"
-  --expected-checkpoint-sha256 "$EXPECTED_CHECKPOINT_SHA256"
   --output-dir "$OUTPUT_DIR"
   --target-fps "$TARGET_FPS"
   --telemetry-hz "$TELEMETRY_HZ"
@@ -64,7 +73,26 @@ arguments=(
   --maximum-consecutive-failures "$MAXIMUM_CONSECUTIVE_FAILURES"
   --dashboard-host "$DASHBOARD_HOST"
   --dashboard-port "$DASHBOARD_PORT"
+  --capture-pre-event-frames "$CAPTURE_PRE_EVENT_FRAMES"
+  --capture-post-event-frames "$CAPTURE_POST_EVENT_FRAMES"
+  --capture-baseline-interval-frames "$CAPTURE_BASELINE_INTERVAL_FRAMES"
+  --capture-queue-size "$CAPTURE_QUEUE_SIZE"
 )
+if [[ "$EVENT_CAPTURE" != "true" ]]; then
+  arguments+=(--no-event-capture)
+fi
+if [[ -n "$MISSION_CONFIG" ]]; then
+  arguments+=(--mission-config "$MISSION_CONFIG")
+fi
+if [[ -n "$MODEL_CONFIG" ]]; then
+  arguments+=(--model-config "$MODEL_CONFIG")
+fi
+if [[ -n "$CHECKPOINT" ]]; then
+  arguments+=(--checkpoint "$CHECKPOINT")
+fi
+if [[ -n "$EXPECTED_CHECKPOINT_SHA256" ]]; then
+  arguments+=(--expected-checkpoint-sha256 "$EXPECTED_CHECKPOINT_SHA256")
+fi
 if [[ -n "$MAX_FRAMES" ]]; then
   arguments+=(--max-frames "$MAX_FRAMES")
 fi
@@ -83,6 +111,9 @@ echo "Starting GET-only SAM-TP SDK shadow dashboard"
 echo "Browser-only mode enabled; set SHOW_WINDOW=true for the legacy OpenCV window"
 if [[ -n "$PLANNER_MODE" ]]; then
   echo "Planner mode override: $PLANNER_MODE"
+fi
+if [[ -n "$MISSION_CONFIG" ]]; then
+  echo "Mission config overlay: $MISSION_CONFIG"
 fi
 if [[ -n "$MISSION_ROUTE_LATEST_OVERRIDE" ]]; then
   echo "Read-only route preview override: latest_scanned_checkpoint=$MISSION_ROUTE_LATEST_OVERRIDE"

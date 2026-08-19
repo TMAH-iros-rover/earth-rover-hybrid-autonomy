@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+RESEARCH_ROOT="$PROJECT_ROOT/research"
 BUNDLE_ROOT="${BUNDLE_ROOT:-$HOME/datasets/generated/traversability_dataset_v1/pilot_20}"
 CVAT_EXPORT="${CVAT_EXPORT:-$BUNDLE_ROOT/traversability_pilot_20_reviewed.zip}"
 OUTPUT_DIR="${OUTPUT_DIR:-$BUNDLE_ROOT/reviewed_import}"
@@ -52,31 +53,31 @@ print(digest.hexdigest())
 PY
 }
 
-cd "$ROOT_DIR"
+cd "$PROJECT_ROOT"
 before_git_status="$(git status --porcelain)"
 
 echo "[1/6] Inspecting exact CLI interfaces"
-"$PYTHON" training/import_cvat_traversability_masks.py --help >/dev/null
-"$PYTHON" training/validate_traversability_dataset_v1.py --help >/dev/null
+"$PYTHON" research/training/import_cvat_traversability_masks.py --help >/dev/null
+"$PYTHON" research/training/validate_traversability_dataset_v1.py --help >/dev/null
 
 echo "[2/6] Running focused CVAT import and validator tests"
 PYTHONDONTWRITEBYTECODE=1 "$PYTHON" -m pytest \
     -p no:cacheprovider -q \
-    tests/test_traversability_annotation.py
+    research/tests/test_traversability_annotation.py
 
 echo "[3/6] Recording raw dataset and CVAT ZIP fingerprints"
 before_dataset="$(dataset_fingerprint)"
 before_zip="$(sha256sum "$CVAT_EXPORT" | awk '{print $1}')"
 
 echo "[4/6] Importing 20 SegmentationClass masks by label name"
-PYTHONDONTWRITEBYTECODE=1 "$PYTHON" training/import_cvat_traversability_masks.py \
+PYTHONDONTWRITEBYTECODE=1 "$PYTHON" research/training/import_cvat_traversability_masks.py \
     --bundle "$BUNDLE_ROOT" \
     --cvat-export "$CVAT_EXPORT" \
     --output-dir "$OUTPUT_DIR" \
     --expected-count 20
 
 echo "[5/6] Running the strict validator independently"
-PYTHONDONTWRITEBYTECODE=1 "$PYTHON" training/validate_traversability_dataset_v1.py \
+PYTHONDONTWRITEBYTECODE=1 "$PYTHON" research/training/validate_traversability_dataset_v1.py \
     --bundle "$BUNDLE_ROOT" \
     --masks-dir "$OUTPUT_DIR/masks" \
     --report-path "$OUTPUT_DIR/validation_report.json"

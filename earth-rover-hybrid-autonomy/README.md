@@ -192,8 +192,14 @@ the SAM-TP shadow process first, then arm the conservative live controller in a
 third terminal:
 
 ```bash
-./scripts/run_mission1_autonomy.sh --enable-live-control
+./scripts/run_sam_tp_sdk_shadow.sh
+./scripts/run_mission1_live.sh
 ```
+
+Both launchers default to the calibrated `configs/mission1_live.yaml`; no
+`MISSION_CONFIG` or `--mission-config` argument is required for the current
+attended rover test. `run_mission1_live.sh` is the explicit live-control entry
+point; `run_mission1_autonomy.sh` without flags remains a no-write dry-run.
 
 It serves controller state at `http://127.0.0.1:8002/status` and waits without
 moving until `Start Mission` succeeds in the browser dashboard. During an
@@ -213,19 +219,26 @@ latched stop and `Resume Auto` to release it. `End Mission` triggers the same
 stop before ending the cloud
 mission. Running the launcher without `--enable-live-control` is a no-write
 dry-run. Because image heading is not yet camera-calibrated metric curvature,
-the initial live limits in `configs/mission1_live.yaml` are deliberately low
+the live limits in `configs/mission1_live.yaml` are deliberately low
 and the first drive must be attended.
 
-Recommended Mission1 live A/B order:
+Recommended Mission1 live order:
 
-1. `./scripts/run_sam_tp_sdk_shadow.sh --planner-mode gps_only` plus dry-run
-   autonomy to verify GPS heading and controller signs.
-2. `./scripts/run_sam_tp_sdk_shadow.sh --planner-mode motion_primitives` in
-   shadow mode; verify selected candidate, confidence, and near-field fields.
-3. `./scripts/run_mission1_autonomy.sh --enable-live-control` only after the
+1. `./scripts/run_sam_tp_sdk_shadow.sh`; verify selected candidate,
+   confidence, near-field, GPS, and heading fields in the dashboard.
+2. `./scripts/run_mission1_live.sh` only after the
    dashboard shows fresh SAM-TP, valid GPS, and stable candidate selection.
-4. Compare the same route with `--planner-mode connected_path` only for
+3. Compare the same route with `--planner-mode connected_path` only for
    rollback/A-B diagnostics.
+
+### Metric camera projection
+
+`configs/mission1_live.yaml` sets `planner.geometry_mode: metric_projected`
+and loads the measured 1024x576 front-camera calibration from
+`configs/calibration/mission1_camera.yaml`. The shadow process must report
+`camera_projection_applied=true` and `image_path_metric_calibrated=true`
+before live control is started. A resolution mismatch or invalid calibration
+still hard-rejects every candidate and keeps Mission1 stopped.
 
 For offline planner stability checks:
 

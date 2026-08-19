@@ -52,6 +52,7 @@ class CheckpointRoutePlanner:
         target_heading_deadband_deg: float = 0.0,
         large_heading_change_deg: float = 180.0,
         max_heading_rate_deg_per_sec: float | None = None,
+        max_heading_sample_interval_sec: float = 0.5,
         monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         radius = _finite(switch_radius_m)
@@ -67,6 +68,11 @@ class CheckpointRoutePlanner:
             not math.isfinite(max_heading_rate_deg_per_sec) or max_heading_rate_deg_per_sec <= 0.0
         ):
             raise ValueError("max_heading_rate_deg_per_sec must be finite and positive")
+        if (
+            not math.isfinite(max_heading_sample_interval_sec)
+            or max_heading_sample_interval_sec <= 0.0
+        ):
+            raise ValueError("max_heading_sample_interval_sec must be finite and positive")
         self._waypoints = WaypointManager(
             checkpoints,
             radius,
@@ -80,6 +86,7 @@ class CheckpointRoutePlanner:
             if max_heading_rate_deg_per_sec is None
             else float(max_heading_rate_deg_per_sec)
         )
+        self._max_heading_sample_interval_sec = float(max_heading_sample_interval_sec)
         self._monotonic = monotonic
         self._filtered_heading_error_deg: float | None = None
         self._filtered_target_sequence: int | None = None
@@ -188,6 +195,14 @@ class CheckpointRoutePlanner:
         self._filtered_heading_error_deg = None
         self._filtered_target_sequence = None
 
+    def reanchor_heading(self) -> None:
+        """Allow the next externally validated heading to establish a new baseline."""
+
+        self._last_accepted_heading_deg = None
+        self._last_accepted_heading_monotonic = None
+        self._filtered_heading_error_deg = None
+        self._filtered_target_sequence = None
+
     def _sanitize_heading(self, heading: float | None) -> float | None:
         """Reject a heading reading that implies an impossible turn rate.
 
@@ -217,14 +232,20 @@ class CheckpointRoutePlanner:
             self._last_accepted_heading_deg = heading
             self._last_accepted_heading_monotonic = now
             return heading
-        dt = max(1e-3, now - self._last_accepted_heading_monotonic)
+        # Do not let a long scheduling/network gap increase the physically
+        # allowed one-sample jump; that previously made a persistent fault
+        # valid merely because enough wall time elapsed.
+        dt = min(
+            self._max_heading_sample_interval_sec,
+            max(1e-3, now - self._last_accepted_heading_monotonic),
+        )
         implied_rate = abs(normalize_angle_deg(heading - self._last_accepted_heading_deg)) / dt
         if implied_rate > self._max_heading_rate_deg_per_sec:
-            # Don't advance the reference timestamp: if this keeps being
-            # reported, growing dt against the same stale reference will
-            # eventually let a real (just fast) change through instead of
-            # rejecting it forever.
-            return self._last_accepted_heading_deg
+            # Fail closed. Advancing time against a stale reference used to
+            # make the same impossible jump become "plausible" later and
+            # eventually feed it into live control.
+            self._last_accepted_heading_monotonic = now
+            return None
         self._last_accepted_heading_deg = heading
         self._last_accepted_heading_monotonic = now
         return heading

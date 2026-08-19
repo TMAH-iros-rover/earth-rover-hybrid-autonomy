@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+RESEARCH_ROOT="$PROJECT_ROOT/research"
 EXPERIMENT_DIR="${EXPERIMENT_DIR:-$HOME/datasets/experiments/traversability_pilot_v1}"
 export HF_HOME="${HF_HOME:-$HOME/datasets/generated/huggingface}"
 
@@ -16,7 +17,7 @@ fi
 
 mkdir -p "$EXPERIMENT_DIR"
 mkdir -p "$HF_HOME"
-cd "$ROOT_DIR"
+cd "$PROJECT_ROOT"
 
 before="$($PYTHON - <<'PY'
 import json

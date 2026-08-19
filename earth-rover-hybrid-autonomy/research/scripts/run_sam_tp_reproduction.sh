@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-WORKSPACE_ROOT="$(cd "$PROJECT_ROOT/../.." && pwd)"
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+RESEARCH_ROOT="$PROJECT_ROOT/research"
+WORKSPACE_ROOT="$(cd "$PROJECT_ROOT/.." && pwd)"
 UPSTREAM_ROOT="${UPSTREAM_ROOT:-$WORKSPACE_ROOT/external/GENIE-SAMTP}"
 ENV_NAME="${ENV_NAME:-sam_tp_repro}"
 ENV_BACKEND="${ENV_BACKEND:-auto}"
 VENV_PATH="${VENV_PATH:-$WORKSPACE_ROOT/external/venvs/$ENV_NAME}"
 PROJECT_PYTHON="${PROJECT_PYTHON:-python3}"
-CONFIG="${CONFIG:-$PROJECT_ROOT/configs/sam_tp_reproduction.yaml}"
+CONFIG="${CONFIG:-$RESEARCH_ROOT/configs/sam_tp_reproduction.yaml}"
 CHECKPOINT="${CHECKPOINT:-$UPSTREAM_ROOT/sam2_logs/configs/sam2.1_training_tiny/sam2_training_custom2_freezeNoneNone_f57.yaml/checkpoints/checkpoint_2.pt}"
 RUN_ID="${RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-$HOME/datasets/experiments/sam_tp_reproduction/$RUN_ID}"
@@ -98,7 +99,7 @@ mkdir -p "$OUTPUT_ROOT"
 echo "[1/7] Running checkpoint-free SAM-TP unit tests"
 PYTHONDONTWRITEBYTECODE=1 env_python -m pytest -p no:cacheprovider -q \
   "$PROJECT_ROOT/tests/test_sam_tp_reproduction.py" \
-  "$PROJECT_ROOT/tests/test_traversability_video_review_v2.py"
+  "$PROJECT_ROOT/research/tests/test_traversability_video_review_v2.py"
 
 echo "[2/7] Running the existing Earth Rover regression suite"
 PYTHONDONTWRITEBYTECODE=1 "$PROJECT_PYTHON" -m pytest -p no:cacheprovider -q \
@@ -106,7 +107,7 @@ PYTHONDONTWRITEBYTECODE=1 "$PROJECT_PYTHON" -m pytest -p no:cacheprovider -q \
 
 echo "[3/7] Strictly checking training config, inference config, and checkpoint"
 env_python \
-  "$PROJECT_ROOT/training/inspect_sam_tp_compatibility.py" \
+  "$PROJECT_ROOT/research/training/inspect_sam_tp_compatibility.py" \
   --reproduction-config "$CONFIG" \
   --upstream-root "$UPSTREAM_ROOT" \
   --checkpoint "$CHECKPOINT" \
@@ -119,7 +120,7 @@ SAM_TP_SMOKE_IMAGE="$SMOKE_IMAGE" \
 PYTHONDONTWRITEBYTECODE=1 env_python -m pytest -p no:cacheprovider -q \
   "$PROJECT_ROOT/tests/test_sam_tp_integration.py"
 env_python \
-  "$PROJECT_ROOT/training/run_sam_tp_smoke.py" \
+  "$PROJECT_ROOT/research/training/run_sam_tp_smoke.py" \
   --image "$SMOKE_IMAGE" \
   --reproduction-config "$CONFIG" \
   --upstream-root "$UPSTREAM_ROOT" \
@@ -129,7 +130,7 @@ env_python \
 
 echo "[5/7] Running deterministic FrodoBots CUDA review"
 env_python \
-  "$PROJECT_ROOT/training/run_sam_tp_video_review.py" \
+  "$PROJECT_ROOT/research/training/run_sam_tp_video_review.py" \
   --reproduction-config "$CONFIG" \
   --upstream-root "$UPSTREAM_ROOT" \
   --checkpoint "$CHECKPOINT" \
@@ -145,7 +146,7 @@ env_python \
 
 echo "[6/7] Writing machine-readable and Markdown reproduction reports"
 env_python \
-  "$PROJECT_ROOT/training/write_sam_tp_reproduction_report.py" \
+  "$PROJECT_ROOT/research/training/write_sam_tp_reproduction_report.py" \
   --compatibility-report "$OUTPUT_ROOT/compatibility_report.json" \
   --smoke-report "$OUTPUT_ROOT/single_image/metadata.json" \
   --video-report "$VIDEO_OUTPUT/review_manifest.json" \

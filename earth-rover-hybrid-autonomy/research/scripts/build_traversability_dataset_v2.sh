@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+RESEARCH_ROOT="$PROJECT_ROOT/research"
 APPROVED_V1="${APPROVED_V1:-$HOME/datasets/generated/traversability_dataset_v1/approved_120_v1}"
 MANUAL_V2="${MANUAL_V2:-$HOME/datasets/review_bundles/traversability_manual_v2_33_imported}"
 OUTPUT_DIR="${OUTPUT_DIR:-$HOME/datasets/generated/traversability_dataset_v2/approved_153_v2}"
@@ -55,19 +56,19 @@ print(digest.hexdigest())
 PY
 }
 
-cd "$ROOT_DIR"
+cd "$PROJECT_ROOT"
 before_git_status="$(git status --porcelain)"
 before_v1="$(tree_fingerprint "$APPROVED_V1")"
 before_manual="$(tree_fingerprint "$MANUAL_V2")"
 
 echo "[1/4] Running focused v2 dataset and loader tests"
 PYTHONDONTWRITEBYTECODE=1 "$PYTHON" -m pytest -p no:cacheprovider -q \
-    tests/test_traversability_dataset_v2.py \
-    tests/test_traversability_segmentation.py \
-    tests/test_import_manual_traversability_v2.py
+    research/tests/test_traversability_dataset_v2.py \
+    research/tests/test_traversability_segmentation.py \
+    research/tests/test_import_manual_traversability_v2.py
 
 echo "[2/4] Building immutable approved_153_v2"
-PYTHONDONTWRITEBYTECODE=1 "$PYTHON" training/build_traversability_dataset_v2.py \
+PYTHONDONTWRITEBYTECODE=1 "$PYTHON" research/training/build_traversability_dataset_v2.py \
     --approved-v1 "$APPROVED_V1" \
     --manual-v2 "$MANUAL_V2" \
     --output-dir "$OUTPUT_DIR" \

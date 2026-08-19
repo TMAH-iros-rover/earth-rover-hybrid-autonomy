@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+RESEARCH_ROOT="$PROJECT_ROOT/research"
 DATASET_ROOT="${FRODOBOTS_DATASET_ROOT:-$HOME/datasets/output_rides_0}"
 OUTPUT_DIR="${FRODOBOTS_MANIFEST_OUTPUT:-$HOME/datasets/manifests/frodobots_2k_phase1/dell_verification_3rides}"
 
@@ -42,19 +43,19 @@ print(digest.hexdigest())
 PY
 }
 
-cd "$ROOT_DIR"
+cd "$PROJECT_ROOT"
 
 echo "[1/4] Running focused Phase 1 tests"
 PYTHONDONTWRITEBYTECODE=1 "$PYTHON" -m pytest \
     -p no:cacheprovider -q \
-    tests/test_frodobots_2k_manifest.py \
-    tests/test_action_labels.py
+    research/tests/test_frodobots_2k_manifest.py \
+    research/tests/test_action_labels.py
 
 echo "[2/4] Recording raw dataset fingerprint"
 before_fingerprint="$(dataset_fingerprint)"
 
 echo "[3/4] Building a three-ride manifest"
-if ! PYTHONDONTWRITEBYTECODE=1 "$PYTHON" training/build_frodobots_2k_manifest.py \
+if ! PYTHONDONTWRITEBYTECODE=1 "$PYTHON" research/training/build_frodobots_2k_manifest.py \
     --dataset-root "$DATASET_ROOT" \
     --output-dir "$OUTPUT_DIR" \
     --max-rides 3 \

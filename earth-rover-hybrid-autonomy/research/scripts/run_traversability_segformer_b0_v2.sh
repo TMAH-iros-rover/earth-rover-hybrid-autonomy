@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+RESEARCH_ROOT="$PROJECT_ROOT/research"
 V2_DATASET="${V2_DATASET:-$HOME/datasets/generated/traversability_dataset_v2/approved_153_v2}"
 MANUAL_V2="${MANUAL_V2:-$HOME/datasets/review_bundles/traversability_manual_v2_33_imported}"
 V1_CHECKPOINT="${V1_CHECKPOINT:-$HOME/datasets/experiments/traversability_segformer_b0_v1/full_training/segformer_b0_best.pt}"
 EXPERIMENT_ROOT="${EXPERIMENT_ROOT:-$HOME/datasets/experiments/traversability_segformer_b0_v2}"
 TRAINING_DIR="$EXPERIMENT_ROOT/full_training"
 COMPARISON_DIR="$EXPERIMENT_ROOT/v1_v2_comparison"
-CONFIG_PATH="$ROOT_DIR/configs/traversability_segformer_b0_v2.yaml"
+CONFIG_PATH="$RESEARCH_ROOT/configs/traversability_segformer_b0_v2.yaml"
 export HF_HOME="${HF_HOME:-$HOME/datasets/generated/huggingface}"
 export CUBLAS_WORKSPACE_CONFIG="${CUBLAS_WORKSPACE_CONFIG:-:4096:8}"
 
@@ -62,7 +63,7 @@ print(digest.hexdigest())
 PY
 }
 
-cd "$ROOT_DIR"
+cd "$PROJECT_ROOT"
 before_git_status="$(git status --porcelain)"
 before_dataset="$(tree_fingerprint "$V2_DATASET")"
 before_manual="$(tree_fingerprint "$MANUAL_V2")"
@@ -70,15 +71,15 @@ before_v1_checkpoint="$(sha256sum "$V1_CHECKPOINT" | awk '{print $1}')"
 
 echo "[1/5] Running focused loader, checkpoint, metric, and v2 split tests"
 PYTHONDONTWRITEBYTECODE=1 "$PYTHON" -m pytest -p no:cacheprovider -q \
-    tests/test_traversability_dataset_v2.py \
-    tests/test_traversability_checkpoint_schema.py \
-    tests/test_traversability_segmentation.py
+    research/tests/test_traversability_dataset_v2.py \
+    research/tests/test_traversability_checkpoint_schema.py \
+    research/tests/test_traversability_segmentation.py
 
 echo "[2/5] Checking CUDA and approved v1 checkpoint schema"
 "$PYTHON" - "$V1_CHECKPOINT" <<'PY'
 import sys
 import torch
-from training.models.traversability_segformer import validate_three_class_checkpoint
+from research.training.models.traversability_segformer import validate_three_class_checkpoint
 
 if not torch.cuda.is_available():
     raise SystemExit("CUDA unavailable")
@@ -93,7 +94,7 @@ print("Approved v1 checkpoint schema: PASS")
 PY
 
 echo "[3/5] Fine-tuning v2 from the approved v1 best checkpoint"
-PYTHONDONTWRITEBYTECODE=1 "$PYTHON" training/train_traversability_segformer.py \
+PYTHONDONTWRITEBYTECODE=1 "$PYTHON" research/training/train_traversability_segformer.py \
     --manifest "$V2_DATASET/manifest.csv" \
     --config "$CONFIG_PATH" \
     --output-dir "$TRAINING_DIR" \
@@ -103,7 +104,7 @@ PYTHONDONTWRITEBYTECODE=1 "$PYTHON" training/train_traversability_segformer.py \
 
 echo "[4/5] Comparing v1 and v2 on fixed v1 evaluation and new holdout"
 set +e
-PYTHONDONTWRITEBYTECODE=1 "$PYTHON" training/evaluate_traversability_v1_v2.py \
+PYTHONDONTWRITEBYTECODE=1 "$PYTHON" research/training/evaluate_traversability_v1_v2.py \
     --manifest "$V2_DATASET/manifest.csv" \
     --config "$CONFIG_PATH" \
     --v1-checkpoint "$V1_CHECKPOINT" \

@@ -74,6 +74,9 @@ const elements = {
   samTpState: document.querySelector("#sam-tp-state"),
   samTpMetrics: document.querySelector("#sam-tp-metrics"),
   autonomyState: document.querySelector("#autonomy-state"),
+  sideSectorLeft: document.querySelector("#side-sector-left"),
+  sideSectorRight: document.querySelector("#side-sector-right"),
+  recoveryMetrics: document.querySelector("#recovery-metrics"),
 };
 
 function nowLabel() {
@@ -629,6 +632,67 @@ function setCameraView(view) {
   pollCamera();
 }
 
+function updateSideSectorOverlay(sideSector) {
+  const left = elements.sideSectorLeft;
+  const right = elements.sideSectorRight;
+  if (!left || !right) {
+    return;
+  }
+  const sides = [
+    [left, sideSector && sideSector.left, "LEFT"],
+    [right, sideSector && sideSector.right, "RIGHT"],
+  ];
+  for (const [element, side, key] of sides) {
+    if (!sideSector || !side || typeof side !== "object") {
+      element.classList.remove("visible", "viable", "not-viable", "chosen");
+      element.textContent = "";
+      continue;
+    }
+    const viable = Boolean(side.viable);
+    const chosen = sideSector.chosen === key;
+    element.classList.add("visible");
+    element.classList.toggle("viable", viable);
+    element.classList.toggle("not-viable", !viable);
+    element.classList.toggle("chosen", chosen);
+    const composite = Number(side.composite);
+    const lowPercentile = Number(side.low_percentile);
+    element.textContent =
+      `${key}${chosen ? " ★" : ""}`
+      + ` composite ${Number.isFinite(composite) ? composite.toFixed(2) : "-"}`
+      + ` low ${Number.isFinite(lowPercentile) ? lowPercentile.toFixed(2) : "-"}`
+      + (viable ? "" : " UNSAFE");
+  }
+}
+
+function updateRecoveryMetrics(recovery) {
+  const element = elements.recoveryMetrics;
+  if (!element) {
+    return;
+  }
+  if (!recovery || typeof recovery !== "object" || !recovery.maneuver_phase) {
+    element.hidden = true;
+    element.textContent = "";
+    return;
+  }
+  const elapsed = Number(recovery.recovery_elapsed_sec);
+  const cooldown = Number(recovery.cooldown_remaining_sec);
+  element.hidden = false;
+  element.textContent =
+    `recovery ${recovery.maneuver_phase}`
+    + (recovery.maneuver_direction ? ` ${recovery.maneuver_direction}` : "")
+    + (Number.isFinite(elapsed) ? ` | ${elapsed.toFixed(1)}s` : "")
+    + (recovery.pulse_count_max
+      ? ` | pulse ${recovery.pulse_count}/${recovery.pulse_count_max}`
+      : "")
+    + (recovery.safe_frame_confirm_required
+      ? ` | safe ${recovery.safe_frame_confirm_count}/${recovery.safe_frame_confirm_required}`
+      : "")
+    + (recovery.direction_confirm_required
+      ? ` | direction ${recovery.direction_confirm_count}/${recovery.direction_confirm_required}`
+      : "")
+    + (Number.isFinite(cooldown) && cooldown > 0 ? ` | cooldown ${cooldown.toFixed(1)}s` : "");
+}
+
 async function pollSamTpStatus() {
   const nowMs = Date.now();
   if (nowMs < state.samTpNextPollMs) {
@@ -701,6 +765,9 @@ async function pollSamTpStatus() {
         pollCamera();
       }
     }
+    // side_sector is only present when planner.side_sector_enabled is on
+    // for the active profile (fail-closed default) -- absent elsewhere.
+    updateSideSectorOverlay(status.planner && status.planner.side_sector);
   } catch (_error) {
     state.samTpNextPollMs = Date.now() + 5000;
     state.samTpAvailable = false;
@@ -710,6 +777,7 @@ async function pollSamTpStatus() {
     elements.samTpState.className = "status status-idle";
     elements.samTpMetrics.textContent =
       "Start the SAM-TP shadow process to enable the overlay.";
+    updateSideSectorOverlay(null);
     if (state.cameraView === "sam-tp") {
       setCameraView("raw");
     }
@@ -743,11 +811,16 @@ async function pollAutonomyStatus() {
     elements.autonomyState.title = status.reason || "";
     elements.autonomyState.className =
       `status ${driving || complete ? "status-online" : "status-idle"}`;
+    // status.recovery is only present while a ROTATE_ESCAPE recovery is
+    // active (or was just aborted/cooling down) -- absent during normal
+    // driving, so this stays hidden and the existing dashboard is unchanged.
+    updateRecoveryMetrics(status.recovery);
   } catch (_error) {
     state.autonomyNextPollMs = Date.now() + 5000;
     elements.autonomyState.textContent = "Autonomy offline";
     elements.autonomyState.title = "Start scripts/run_mission1_autonomy.sh";
     elements.autonomyState.className = "status status-idle";
+    updateRecoveryMetrics(null);
   } finally {
     state.autonomyStatusRequestRunning = false;
   }

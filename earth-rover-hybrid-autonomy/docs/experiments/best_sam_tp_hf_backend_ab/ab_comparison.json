@@ -1,0 +1,38 @@
+[
+  {
+    "backend": "hf_sam2 (best_sam_tp.pt)",
+    "logits_min": -11.374041557312012,
+    "logits_max": 6.509255409240723,
+    "logits_mean": -2.198345422744751,
+    "logits_std": 5.825916290283203,
+    "score_min": 1.1489775015944815e-05,
+    "score_max": 0.9985126271294128,
+    "score_mean": 0.46805868210807094,
+    "score_std": 0.4723405744328741,
+    "near_field_score": 0.9312485814094543,
+    "near_field_safe": true,
+    "trajectory_valid": true,
+    "selected_candidate_heading_deg": 0.0,
+    "selected_candidate_final_score": 0.8734354625044365,
+    "planner_confidence": 0.9243922706734771,
+    "inference_time_ms": 302.27496099541895
+  },
+  {
+    "backend": "genie_sam_tp (checkpoint_2.pt)",
+    "logits_min": -8.916423797607422,
+    "logits_max": 6.967823028564453,
+    "logits_mean": -1.0822490453720093,
+    "logits_std": 4.325532913208008,
+    "score_min": 0.00013414920249488205,
+    "score_max": 0.9990591406822205,
+    "score_mean": 0.4645412862300873,
+    "score_std": 0.45109105110168457,
+    "near_field_score": 0.9465133070945739,
+    "near_field_safe": true,
+    "trajectory_valid": true,
+    "selected_candidate_heading_deg": 0.0,
+    "selected_candidate_final_score": 0.9264896979078834,
+    "planner_confidence": 0.9570366203664786,
+    "inference_time_ms": 292.6353329967242
+  }
+]

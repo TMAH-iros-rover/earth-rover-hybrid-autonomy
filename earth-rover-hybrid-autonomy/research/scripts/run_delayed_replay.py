@@ -35,7 +35,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Replay an Urban run with delayed sensor/frame packets.")
     parser.add_argument("run_dir")
     parser.add_argument("--config", default="configs/default.yaml")
-    parser.add_argument("--override", default="configs/urban_latency_2s.yaml")
+    parser.add_argument("--override", default="research/configs/urban_latency_2s.yaml")
     parser.add_argument("--delay-sec", type=float, default=None)
     parser.add_argument("--output-dir", default=None)
     args = parser.parse_args()

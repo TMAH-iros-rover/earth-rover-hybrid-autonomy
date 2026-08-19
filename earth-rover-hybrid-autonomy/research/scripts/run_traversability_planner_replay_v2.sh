@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+RESEARCH_ROOT="$PROJECT_ROOT/research"
 CHECKPOINT="${CHECKPOINT:-$HOME/datasets/experiments/traversability_segformer_b0_v2/full_training/segformer_b0_best.pt}"
-TRAINING_CONFIG="${TRAINING_CONFIG:-$ROOT_DIR/configs/traversability_segformer_b0_v2.yaml}"
-AUTONOMY_CONFIG="${AUTONOMY_CONFIG:-$ROOT_DIR/configs/urban_replay_v2.yaml}"
-LATENCY_PROFILE="${LATENCY_PROFILE:-$ROOT_DIR/configs/urban_latency_2s.yaml}"
+TRAINING_CONFIG="${TRAINING_CONFIG:-$RESEARCH_ROOT/configs/traversability_segformer_b0_v2.yaml}"
+AUTONOMY_CONFIG="${AUTONOMY_CONFIG:-$RESEARCH_ROOT/configs/urban_replay_v2.yaml}"
+LATENCY_PROFILE="${LATENCY_PROFILE:-$RESEARCH_ROOT/configs/urban_latency_2s.yaml}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-$HOME/datasets/review_bundles/traversability_planner_replay_v2}"
 DATASET_ROOT_0="${DATASET_ROOT_0:-$HOME/datasets/output_rides_0}"
 DATASET_ROOT_1="${DATASET_ROOT_1:-$HOME/datasets/output_rides_1}"
@@ -39,16 +40,16 @@ if [[ "$(ffmpeg -hide_banner -encoders 2>/dev/null)" != *libx264* ]]; then
     exit 1
 fi
 
-cd "$ROOT_DIR"
+cd "$PROJECT_ROOT"
 git_state_before="$(git status --porcelain --untracked-files=all)"
 echo "[1/3] Running focused offline planner replay tests"
 PYTHONDONTWRITEBYTECODE=1 "$PYTHON" -m pytest -p no:cacheprovider -q \
-    tests/test_traversability_adapter.py \
-    tests/test_goal_aware_local_planner.py \
-    tests/test_traversability_replay.py \
-    tests/test_traversability_planner_replay_v2.py \
+    research/tests/test_traversability_adapter.py \
+    research/tests/test_goal_aware_local_planner.py \
+    research/tests/test_traversability_replay.py \
+    research/tests/test_traversability_planner_replay_v2.py \
     tests/test_command_filter.py \
-    tests/test_hybrid_controller.py
+    research/tests/test_hybrid_controller.py
 
 echo "[2/3] Running log-only planner replay (latency=${LATENCY_SEC}s, datasets=${DATASETS})"
 arguments=(
@@ -77,7 +78,7 @@ if [[ "$OVERWRITE" == "true" ]]; then
     arguments+=(--overwrite)
 fi
 PYTHONDONTWRITEBYTECODE=1 "$PYTHON" \
-    training/run_traversability_planner_replay_v2.py "${arguments[@]}"
+    research/training/run_traversability_planner_replay_v2.py "${arguments[@]}"
 
 echo "[3/3] Verifying log-only, H.264, and Git invariants"
 "$PYTHON" - "$OUTPUT_DIR" <<'PY'

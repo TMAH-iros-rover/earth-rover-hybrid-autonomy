@@ -1,0 +1,39 @@
+# Front camera calibration used by the metric Mission1 planner.
+#
+# Frame convention:
+#   rover ground frame: +x forward, +y left, +z up, ground plane z=0
+#   camera optical frame: +x right, +y down, +z forward
+#
+# The reported camera pose relative to base_link is x=0.100 m, z=0.087 m.
+# The metric planner projects ground-plane points, so the transform below
+# uses the independently measured camera height above ground, 0.145 m.
+
+schema_version: 1
+calibration_id: "mission1_front_camera_1024x576_2026_08_14"
+placeholder: false
+
+image_width: 1024
+image_height: 576
+
+camera_matrix:
+  - [491.1568229675591, 0.0, 509.3800751643276]
+  - [0.0, 493.9500442214054, 267.4264474521625]
+  - [0.0, 0.0, 1.0]
+
+distortion_model: "opencv_pinhole"
+distortion_coefficients:
+  - -0.27202200129904086
+  - 0.0714303303013014
+  - -0.000338402093278862
+  - 0.0010053983916549474
+  - -0.008558501568650742
+
+camera_from_rover_transform:
+  - [0.0, -1.0, 0.0, 0.0]
+  - [0.0, 0.0, -1.0, 0.145]
+  - [1.0, 0.0, 0.0, -0.10]
+  - [0.0, 0.0, 0.0, 1.0]
+
+provenance:
+  capture_date: "2026-08-14"
+  capture_source: "operator-provided front-camera intrinsics and measured base_link mount geometry"

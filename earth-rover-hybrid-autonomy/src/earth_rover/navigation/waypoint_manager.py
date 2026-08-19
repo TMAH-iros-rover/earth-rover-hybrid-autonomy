@@ -11,6 +11,7 @@ class WaypointManager:
         self.checkpoints = sorted(checkpoints, key=lambda item: int(safe_float(item.get("sequence"), 0) or 0))
         self.switch_radius_m = switch_radius_m
         self.index = self._index_after_sequence(latest_scanned_checkpoint)
+        self._reached_latched = False
 
     def current_target(self) -> Optional[dict]:
         if self.index >= len(self.checkpoints):
@@ -28,7 +29,9 @@ class WaypointManager:
             return {"target": target, "distance_m": None, "reached": False, "finished": False}
 
         distance = haversine_distance_m(latitude, longitude, target_lat, target_lon)
-        reached = distance <= self.switch_radius_m
+        if distance <= self.switch_radius_m:
+            self._reached_latched = True
+        reached = self._reached_latched
         return {
             "target": target,
             "distance_m": distance,
@@ -39,6 +42,7 @@ class WaypointManager:
     def mark_current_reported(self) -> None:
         if self.index < len(self.checkpoints):
             self.index += 1
+            self._reached_latched = False
 
     def _index_after_sequence(self, latest_scanned_checkpoint: int) -> int:
         latest = int(latest_scanned_checkpoint or 0)

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+RESEARCH_ROOT="$PROJECT_ROOT/research"
 DATASET_ROOT_1="${DATASET_ROOT_1:-$HOME/datasets/output_rides_1}"
 DATASET_ROOT_2="${DATASET_ROOT_2:-$HOME/datasets/output_rides_2}"
 APPROVED_METADATA="${APPROVED_METADATA:-$HOME/datasets/generated/traversability_dataset_v1/approved_120_v1/metadata.csv}"
@@ -79,21 +80,21 @@ print(digest.hexdigest())
 PY
 }
 
-cd "$ROOT_DIR"
+cd "$PROJECT_ROOT"
 before_git_status="$(git status --porcelain)"
 
 echo "[1/6] Running focused manual-candidate tests"
 PYTHONDONTWRITEBYTECODE=1 "$PYTHON" -m pytest -p no:cacheprovider -q \
-    tests/test_manual_candidate_sampling.py \
-    tests/test_traversability_expansion.py \
-    tests/test_frodobots_2k_dataset.py
+    research/tests/test_manual_candidate_sampling.py \
+    research/tests/test_traversability_expansion.py \
+    research/tests/test_frodobots_2k_dataset.py
 
 echo "[2/6] Recording immutable raw-dataset fingerprints"
 before_dataset_1="$(tree_fingerprint "$DATASET_ROOT_1")"
 before_dataset_2="$(tree_fingerprint "$DATASET_ROOT_2")"
 
 echo "[3/6] Running the 12-image extraction dry run"
-PYTHONDONTWRITEBYTECODE=1 "$PYTHON" training/build_manual_candidates_v2.py \
+PYTHONDONTWRITEBYTECODE=1 "$PYTHON" research/training/build_manual_candidates_v2.py \
     --dataset-root "$DATASET_ROOT_1" \
     --dataset-root "$DATASET_ROOT_2" \
     "${exclude_args[@]}" \
@@ -125,7 +126,7 @@ print("Manual candidate dry-run gate: PASS")
 PY
 
 echo "[4/6] Building the deterministic approximately 200-image review pool"
-PYTHONDONTWRITEBYTECODE=1 "$PYTHON" training/build_manual_candidates_v2.py \
+PYTHONDONTWRITEBYTECODE=1 "$PYTHON" research/training/build_manual_candidates_v2.py \
     --dataset-root "$DATASET_ROOT_1" \
     --dataset-root "$DATASET_ROOT_2" \
     "${exclude_args[@]}" \

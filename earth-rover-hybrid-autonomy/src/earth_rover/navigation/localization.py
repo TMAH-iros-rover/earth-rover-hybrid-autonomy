@@ -20,14 +20,6 @@ logger = logging.getLogger(__name__)
 
 _STATE_SIZE = 4  # [x_m, y_m, heading_rad, gyro_bias_rad_s]
 
-# Last-resort multiple of heading_outlier_confirm_streak before a
-# persistently-rejected heading reading is force-accepted even while gyro
-# is nominally trusted but never corroborates it either way (e.g. gyro
-# feed silently stops). Not exposed as a config knob -- it only matters
-# for this one degraded edge case, not something a deployment should need
-# to independently tune.
-_HEADING_OUTLIER_HARD_CAP_MULTIPLIER = 3
-
 
 @dataclass(frozen=True)
 class GpsHeadingEkfConfig:
@@ -102,16 +94,13 @@ class GpsHeadingEkfConfig:
     # out of both the Kalman update and the gyro-disagreement bookkeeping
     # instead of being fused.
     heading_outlier_reject_deg: float = 60.0
-    # A rejected reading isn't discarded forever once gyro *can't* vouch
-    # for it either way (untrusted/disabled): after this many consecutive
-    # rejections, the most recent reading is fused anyway (P has grown
-    # unmeasured that whole time, so the correction snaps straight to it).
-    # While gyro is trusted this count alone is deliberately NOT enough to
-    # force-accept -- see the comment in _update_heading for why a live
-    # run showed that force-accepting on a strike count anyway snaps onto
-    # whatever the rejected reading happens to be at that moment, which is
-    # exactly as likely to be the fault as the truth.
-    heading_outlier_confirm_streak: int = 20
+    # Fail closed after an outlier or missing heading. If gyro fusion has
+    # already been disabled, this many mutually consistent outlier samples
+    # may establish a new absolute-heading baseline. A trusted gyro never
+    # permits this fallback because it still provides independent motion
+    # evidence against a compass flip.
+    heading_recovery_streak: int = 3
+    heading_recovery_max_delta_deg: float = 8.0
 
     @classmethod
     def from_dict(cls, config: dict[str, Any] | None) -> "GpsHeadingEkfConfig":
@@ -136,6 +125,7 @@ class GpsHeadingEkfConfig:
             "gyro_bias_process_noise": self.gyro_bias_process_noise,
             "gyro_scale_rad_per_sec_per_unit": self.gyro_scale_rad_per_sec_per_unit,
             "heading_outlier_reject_deg": self.heading_outlier_reject_deg,
+            "heading_recovery_max_delta_deg": self.heading_recovery_max_delta_deg,
         }
         if any(not math.isfinite(value) or value <= 0.0 for value in positive.values()):
             raise ValueError(
@@ -162,11 +152,11 @@ class GpsHeadingEkfConfig:
         ):
             raise ValueError("gyro_disagreement_threshold must be in [-1, 1]")
         if (
-            isinstance(self.heading_outlier_confirm_streak, bool)
-            or not isinstance(self.heading_outlier_confirm_streak, int)
-            or self.heading_outlier_confirm_streak < 1
+            isinstance(self.heading_recovery_streak, bool)
+            or not isinstance(self.heading_recovery_streak, int)
+            or self.heading_recovery_streak < 1
         ):
-            raise ValueError("heading_outlier_confirm_streak must be a positive integer")
+            raise ValueError("heading_recovery_streak must be a positive integer")
 
 
 class GpsHeadingEkf:
@@ -224,6 +214,12 @@ class GpsHeadingEkf:
         self._gyro_delta_accum = 0.0
         self._heading_at_last_measurement: float | None = None
         self._heading_outlier_streak = 0
+        self._heading_recovery_count = 0
+        self._heading_valid = False
+        self._heading_status_reason = "UNINITIALIZED"
+        self._last_heading_innovation_deg: float | None = None
+        self._last_recovery_heading_rad: float | None = None
+        self._heading_reanchor_pending = False
         self._disagreement_pairs: deque[tuple[float, float]] = deque(
             maxlen=self.config.gyro_disagreement_window
         )
@@ -235,6 +231,29 @@ class GpsHeadingEkf:
     @property
     def is_locked(self) -> bool:
         return self._state is not None
+
+    @property
+    def heading_valid(self) -> bool:
+        return self._heading_valid
+
+    def status(self) -> dict[str, object]:
+        return {
+            "heading_valid": self._heading_valid,
+            "heading_status_reason": self._heading_status_reason,
+            "heading_outlier_streak": self._heading_outlier_streak,
+            "heading_recovery_count": self._heading_recovery_count,
+            "heading_recovery_required": self.config.heading_recovery_streak,
+            "heading_recovery_max_delta_deg": self.config.heading_recovery_max_delta_deg,
+            "last_heading_innovation_deg": self._last_heading_innovation_deg,
+            "gyro_trusted": self._gyro_trusted,
+        }
+
+    def consume_heading_reanchor(self) -> bool:
+        """Return and clear the one-shot route-filter reanchor signal."""
+
+        pending = self._heading_reanchor_pending
+        self._heading_reanchor_pending = False
+        return pending
 
     @property
     def origin(self) -> tuple[float, float] | None:
@@ -326,6 +345,14 @@ class GpsHeadingEkf:
                 ]
             )
             self._heading_at_last_measurement = heading0
+            self._heading_valid = heading_deg_value is not None
+            self._heading_status_reason = (
+                "OK" if self._heading_valid else "MISSING_HEADING"
+            )
+            self._heading_recovery_count = (
+                self.config.heading_recovery_streak if self._heading_valid else 0
+            )
+            self._last_recovery_heading_rad = None
             return
 
         dt = 0.0
@@ -337,6 +364,11 @@ class GpsHeadingEkf:
         self._update_gps(x_meas, y_meas, self._gps_accuracy_m(gps_signal))
         if heading_deg_value is not None:
             self._update_heading(math.radians(heading_deg_value))
+        else:
+            self._heading_valid = False
+            self._heading_status_reason = "MISSING_HEADING"
+            self._heading_recovery_count = 0
+            self._last_recovery_heading_rad = None
         self._last_fusion_monotonic = now
 
     def current_estimate(self) -> tuple[float, float, float] | tuple[None, None, None]:
@@ -415,46 +447,59 @@ class GpsHeadingEkf:
     def _update_heading(self, heading_meas_rad: float) -> None:
         assert self._state is not None
         raw_innovation = normalize_angle_rad(heading_meas_rad - float(self._state[2]))
+        self._last_heading_innovation_deg = math.degrees(raw_innovation)
         reject_threshold = math.radians(self.config.heading_outlier_reject_deg)
         if abs(raw_innovation) > reject_threshold:
             self._heading_outlier_streak += 1
-            # A live rotation test caught the flaw in a plain strike-count
-            # fallback: while gyro is trusted it's still propagating state[2]
-            # every _predict tick (real motion, unfrozen), so a reading that
-            # STAYS rejected for the full confirm streak means gyro actively
-            # disagrees with it -- force-accepting anyway (the original
-            # design) snapped the filter onto a bogus ~170 deg reading mid
-            # rotation, then gyro dragged that wrong anchor along in the
-            # true turn's direction for another ~15s before a second
-            # force-accept happened to land back near truth. A genuine
-            # change gyro agrees with instead drifts state close enough on
-            # its own for innovation to drop under the threshold -- no
-            # force-accept needed. So: only blind-accept on a strike count
-            # once gyro can't vouch either way (untrusted), and even then
-            # only past the normal confirm streak; a much longer hard cap
-            # is the last-resort safety valve for a gyro that's nominally
-            # trusted but simply never being fed anything (never
-            # challenged, never disagrees) so a real change would otherwise
-            # be held out forever.
-            untrusted_fallback = (
-                not self._gyro_trusted
-                and self._heading_outlier_streak >= self.config.heading_outlier_confirm_streak
-            )
-            hard_cap_reached = self._heading_outlier_streak >= (
-                self.config.heading_outlier_confirm_streak
-                * _HEADING_OUTLIER_HARD_CAP_MULTIPLIER
-            )
-            if not (untrusted_fallback or hard_cap_reached):
-                logger.debug(
-                    "GpsHeadingEkf: rejecting heading measurement %.1f deg "
-                    "(innovation %.1f deg exceeds heading_outlier_reject_deg, "
-                    "streak=%d, gyro_trusted=%s)",
-                    math.degrees(heading_meas_rad),
-                    math.degrees(raw_innovation),
-                    self._heading_outlier_streak,
-                    self._gyro_trusted,
+            self._heading_valid = False
+            recovery_delta = (
+                None
+                if self._last_recovery_heading_rad is None
+                else abs(
+                    normalize_angle_rad(
+                        heading_meas_rad - self._last_recovery_heading_rad
+                    )
                 )
+            )
+            if (
+                recovery_delta is None
+                or math.degrees(recovery_delta)
+                > self.config.heading_recovery_max_delta_deg
+            ):
+                self._heading_recovery_count = 1
+            else:
+                self._heading_recovery_count += 1
+            self._last_recovery_heading_rad = heading_meas_rad
+
+            if (
+                not self._gyro_trusted
+                and self._heading_recovery_count
+                >= self.config.heading_recovery_streak
+            ):
+                self._reanchor_heading(heading_meas_rad)
                 return
+
+            self._heading_status_reason = (
+                "HEADING_OUTLIER_RECOVERING"
+                if not self._gyro_trusted and self._heading_recovery_count > 1
+                else "HEADING_OUTLIER_REJECTED"
+            )
+            log = (
+                logger.warning
+                if self._heading_outlier_streak == 1
+                or self._heading_outlier_streak % 20 == 0
+                else logger.debug
+            )
+            log(
+                "GpsHeadingEkf: rejecting heading measurement %.1f deg "
+                "(innovation %.1f deg, streak=%d, gyro_trusted=%s); "
+                "navigation heading is invalid until recovery",
+                math.degrees(heading_meas_rad),
+                math.degrees(raw_innovation),
+                self._heading_outlier_streak,
+                self._gyro_trusted,
+            )
+            return
         self._heading_outlier_streak = 0
 
         H = np.array([[0.0, 0.0, 1.0, 0.0]])
@@ -473,6 +518,60 @@ class GpsHeadingEkf:
             self._maybe_disable_gyro()
         self._gyro_delta_accum = 0.0
         self._heading_at_last_measurement = heading_meas_rad
+        if self._heading_valid:
+            self._heading_recovery_count = self.config.heading_recovery_streak
+            self._heading_status_reason = "OK" if self._gyro_trusted else "OK_GYRO_UNTRUSTED"
+            self._last_recovery_heading_rad = None
+        else:
+            recovery_delta = (
+                None
+                if self._last_recovery_heading_rad is None
+                else abs(
+                    normalize_angle_rad(
+                        heading_meas_rad - self._last_recovery_heading_rad
+                    )
+                )
+            )
+            if (
+                recovery_delta is None
+                or math.degrees(recovery_delta)
+                > self.config.heading_recovery_max_delta_deg
+            ):
+                self._heading_recovery_count = 1
+            else:
+                self._heading_recovery_count += 1
+            self._last_recovery_heading_rad = heading_meas_rad
+            if self._heading_recovery_count >= self.config.heading_recovery_streak:
+                self._heading_valid = True
+                self._heading_status_reason = (
+                    "OK" if self._gyro_trusted else "OK_GYRO_UNTRUSTED"
+                )
+                self._last_recovery_heading_rad = None
+            else:
+                self._heading_status_reason = "HEADING_RECOVERING"
+
+    def _reanchor_heading(self, heading_meas_rad: float) -> None:
+        """Reinitialize heading after stable absolute samples with no trusted gyro."""
+
+        assert self._state is not None and self._P is not None
+        self._state[2] = normalize_angle_rad(heading_meas_rad)
+        self._P[2, :] = 0.0
+        self._P[:, 2] = 0.0
+        self._P[2, 2] = math.radians(self.config.heading_measurement_std_deg) ** 2
+        self._gyro_delta_accum = 0.0
+        self._heading_at_last_measurement = heading_meas_rad
+        self._heading_outlier_streak = 0
+        self._heading_recovery_count = self.config.heading_recovery_streak
+        self._last_recovery_heading_rad = None
+        self._heading_valid = True
+        self._heading_status_reason = "HEADING_REACQUIRED_GYRO_UNTRUSTED"
+        self._heading_reanchor_pending = True
+        logger.warning(
+            "GpsHeadingEkf: reanchored heading to %.1f deg after %d stable "
+            "absolute samples with gyro fusion disabled",
+            math.degrees(heading_meas_rad) % 360.0,
+            self.config.heading_recovery_streak,
+        )
 
     def _maybe_disable_gyro(self) -> None:
         if len(self._disagreement_pairs) < self.config.gyro_disagreement_window:

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+RESEARCH_ROOT="$PROJECT_ROOT/research"
 DATASET_ROOT="${DATASET_ROOT:-$HOME/datasets/output_rides_0}"
 PILOT_BUNDLE="${PILOT_BUNDLE:-$HOME/datasets/generated/traversability_dataset_v1/pilot_20}"
 PILOT_REVIEWED="${PILOT_REVIEWED:-$PILOT_BUNDLE/reviewed_import}"
@@ -11,7 +12,7 @@ APPROVED_DATASET="${APPROVED_DATASET:-$HOME/datasets/generated/traversability_da
 EXPERIMENT_ROOT="${EXPERIMENT_ROOT:-$HOME/datasets/experiments/traversability_segformer_b0_v1}"
 OVERFIT_DIR="$EXPERIMENT_ROOT/overfit_sanity"
 TRAINING_DIR="$EXPERIMENT_ROOT/full_training"
-CONFIG_PATH="$ROOT_DIR/configs/traversability_segformer_b0_v1.yaml"
+CONFIG_PATH="$RESEARCH_ROOT/configs/traversability_segformer_b0_v1.yaml"
 SEED="${SEED:-20260718}"
 REUSE_APPROVED_DATASET="${REUSE_APPROVED_DATASET:-false}"
 export HF_HOME="${HF_HOME:-$HOME/datasets/generated/huggingface}"
@@ -89,14 +90,14 @@ print(digest.hexdigest())
 PY
 }
 
-cd "$ROOT_DIR"
+cd "$PROJECT_ROOT"
 before_git_status="$(git status --porcelain)"
 
 echo "[1/8] Running focused dataset, loader, split, metric, and annotation tests"
 PYTHONDONTWRITEBYTECODE=1 "$PYTHON" -m pytest \
     -p no:cacheprovider -q \
-    tests/test_traversability_segmentation.py \
-    tests/test_traversability_annotation.py
+    research/tests/test_traversability_segmentation.py \
+    research/tests/test_traversability_annotation.py
 
 echo "[2/8] Checking Dell CUDA/runtime and recording immutable fingerprints"
 "$PYTHON" - <<'PY'
@@ -117,7 +118,7 @@ echo "[3/8] Building immutable approved_120_v1 and deterministic ride split"
 if [[ "$REUSE_APPROVED_DATASET" == "true" ]]; then
     echo "Reusing previously validated approved dataset: $APPROVED_DATASET"
 else
-    PYTHONDONTWRITEBYTECODE=1 "$PYTHON" training/build_approved_traversability_dataset_v1.py \
+    PYTHONDONTWRITEBYTECODE=1 "$PYTHON" research/training/build_approved_traversability_dataset_v1.py \
         --pilot-bundle "$PILOT_BUNDLE" \
         --pilot-reviewed "$PILOT_REVIEWED" \
         --expansion-bundle "$EXPANSION_BUNDLE" \
@@ -161,7 +162,7 @@ PY
 before_approved="$(tree_fingerprint "$APPROVED_DATASET")"
 
 echo "[5/8] Running the 6-image CUDA overfit sanity gate"
-PYTHONDONTWRITEBYTECODE=1 "$PYTHON" training/train_traversability_segformer.py \
+PYTHONDONTWRITEBYTECODE=1 "$PYTHON" research/training/train_traversability_segformer.py \
     --manifest "$APPROVED_DATASET/manifest.csv" \
     --config "$CONFIG_PATH" \
     --output-dir "$OVERFIT_DIR" \
@@ -182,7 +183,7 @@ print("Overfit sanity gate: PASS")
 PY
 
 echo "[6/8] Running first unweighted 120-image SegFormer-B0 fine-tuning"
-PYTHONDONTWRITEBYTECODE=1 "$PYTHON" training/train_traversability_segformer.py \
+PYTHONDONTWRITEBYTECODE=1 "$PYTHON" research/training/train_traversability_segformer.py \
     --manifest "$APPROVED_DATASET/manifest.csv" \
     --config "$CONFIG_PATH" \
     --output-dir "$TRAINING_DIR" \

@@ -63,13 +63,19 @@
           <div class="camera-stage">
             <img id="front-camera" alt="Earth Rover front camera" />
             <div id="camera-placeholder">Connect the rover or start a mission to load the front camera.</div>
+            <div id="side-sector-overlay" class="side-sector-overlay" aria-hidden="true">
+              <div id="side-sector-left" class="side-sector-rect side-sector-left"></div>
+              <div id="side-sector-right" class="side-sector-rect side-sector-right"></div>
+            </div>
           </div>
           <div class="perception-legend">
             <span><i class="score-swatch low"></i>Low traversability</span>
             <span><i class="score-swatch high"></i>High traversability</span>
             <span><i class="goal-swatch"></i>GPS global heading</span>
             <span><i class="path-swatch"></i>SAM-TP heading-aware local path</span>
+            <span><i class="side-sector-swatch"></i>ROTATE_ESCAPE side sector (chosen side highlighted)</span>
             <span id="sam-tp-metrics">Start the SAM-TP shadow process to enable the overlay.</span>
+            <span id="recovery-metrics" class="recovery-metrics" hidden></span>
           </div>
         </div>
 

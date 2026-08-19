@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+RESEARCH_ROOT="$PROJECT_ROOT/research"
 SOURCE_BUNDLE="${SOURCE_BUNDLE:-$HOME/datasets/review_bundles/manual_candidates_v2_selected}"
 CVAT_EXPORT="${CVAT_EXPORT:-$SOURCE_BUNDLE/traversability_manual_v2_33_cvat_export.zip}"
 OUTPUT_DIR="${OUTPUT_DIR:-$HOME/datasets/review_bundles/traversability_manual_v2_33_imported}"
-LABEL_CONTRACT="${LABEL_CONTRACT:-$ROOT_DIR/configs/traversability_dataset_v1.yaml}"
+LABEL_CONTRACT="${LABEL_CONTRACT:-$RESEARCH_ROOT/configs/traversability_dataset_v1.yaml}"
 EXPECTED_COUNT=33
 
 if command -v python3 >/dev/null 2>&1; then
@@ -58,19 +59,19 @@ print(digest.hexdigest())
 PY
 }
 
-cd "$ROOT_DIR"
+cd "$PROJECT_ROOT"
 before_git_status="$(git status --porcelain)"
 before_source="$(tree_fingerprint "$SOURCE_BUNDLE")"
 before_zip="$(sha256sum "$CVAT_EXPORT" | awk '{print $1}')"
 
 echo "[1/4] Running focused manual-v2 import tests"
 PYTHONDONTWRITEBYTECODE=1 "$PYTHON" -m pytest -p no:cacheprovider -q \
-    tests/test_import_manual_traversability_v2.py \
-    tests/test_select_manual_candidates_v2.py \
-    tests/test_traversability_annotation.py
+    research/tests/test_import_manual_traversability_v2.py \
+    research/tests/test_select_manual_candidates_v2.py \
+    research/tests/test_traversability_annotation.py
 
 echo "[2/4] Importing and validating 33 SegmentationClass masks"
-PYTHONDONTWRITEBYTECODE=1 "$PYTHON" training/import_manual_traversability_v2.py \
+PYTHONDONTWRITEBYTECODE=1 "$PYTHON" research/training/import_manual_traversability_v2.py \
     --source-bundle "$SOURCE_BUNDLE" \
     --cvat-export "$CVAT_EXPORT" \
     --output-dir "$OUTPUT_DIR" \

@@ -21,16 +21,19 @@ class DashboardSnapshot:
 class DashboardSnapshotStore:
     """Thread-safe latest-value store for the browser dashboard bridge."""
 
-    def __init__(self) -> None:
+    def __init__(self, checkpoint_metadata: dict[str, Any] | None = None) -> None:
         self._lock = threading.Lock()
+        initial_status: dict[str, Any] = {
+            "service": "sam-tp-shadow",
+            "ready": False,
+            "state": "STARTING",
+            "command_transmitted": False,
+        }
+        if checkpoint_metadata is not None:
+            initial_status["checkpoint"] = dict(checkpoint_metadata)
         self._snapshot = DashboardSnapshot(
             jpeg=None,
-            status={
-                "service": "sam-tp-shadow",
-                "ready": False,
-                "state": "STARTING",
-                "command_transmitted": False,
-            },
+            status=initial_status,
         )
 
     def publish(self, image_bgr: np.ndarray, record: dict[str, Any]) -> None:
@@ -80,6 +83,15 @@ class DashboardSnapshotStore:
                 "global_target_heading_error_deg"
             ),
             "planner": record.get("planner"),
+            "geometry_mode": record.get("geometry_mode"),
+            "camera_projection_applied": record.get("camera_projection_applied"),
+            "image_path_metric_calibrated": record.get(
+                "image_path_metric_calibrated"
+            ),
+            "calibration_id": record.get("calibration_id"),
+            "calibration_sha256_prefix": record.get(
+                "calibration_sha256_prefix"
+            ),
             "near_field_safe": record.get("near_field_safe"),
             "near_field_score": record.get("near_field_score"),
             "trajectory_valid": record.get("trajectory_valid"),
@@ -88,7 +100,17 @@ class DashboardSnapshotStore:
             "plan_age_sec": record.get("plan_age_sec"),
             "using_held_plan": record.get("using_held_plan"),
             "navigation": record.get("navigation"),
+            "localization": record.get("localization"),
+            # Rover motion telemetry, forwarded as-is so Mission1Autonomy can
+            # confirm the rover is physically stationary before a recovery
+            # rotation (see ROTATE_ESCAPE's STOP_CONFIRM phase). Previously
+            # computed in run_shadow_step() but dropped at this boundary.
+            "telemetry": record.get("telemetry"),
+            "telemetry_valid": record.get("telemetry_valid"),
+            "telemetry_age_sec": record.get("telemetry_age_sec"),
+            "capture_event_reasons": record.get("capture_event_reasons", []),
             "sdk_clock_offset_hours": record.get("sdk_clock_offset_hours"),
+            "checkpoint": record.get("checkpoint"),
             "command_transmitted": False,
         }
         with self._lock:
@@ -126,10 +148,11 @@ class SamTpDashboardServer:
         host: str = "127.0.0.1",
         port: int = 8001,
         store: DashboardSnapshotStore | None = None,
+        checkpoint_metadata: dict[str, Any] | None = None,
     ) -> None:
         if not 0 <= port <= 65535:
             raise ValueError("port must be in [0, 65535]")
-        self.store = store or DashboardSnapshotStore()
+        self.store = store or DashboardSnapshotStore(checkpoint_metadata)
         handler = _handler_for(self.store)
         self._server = ThreadingHTTPServer((host, port), handler)
         self._thread: threading.Thread | None = None

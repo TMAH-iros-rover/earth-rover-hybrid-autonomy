@@ -73,6 +73,10 @@ def test_reached_checkpoint_waits_for_successful_report_before_advancing() -> No
     still_waiting = planner.update(37.0001, 127.0, heading_deg=90.0)
     assert still_waiting.target_sequence == 1
 
+    drifted_outside = planner.update(37.001, 127.0, heading_deg=90.0)
+    assert drifted_outside.reached is True
+    assert drifted_outside.reason == "CHECKPOINT_REACHED_PENDING_REPORT"
+
     planner.mark_current_reported()
     next_target = planner.update(37.0001, 127.0, heading_deg=90.0)
     assert next_target.target_sequence == 2
@@ -132,10 +136,12 @@ def test_rejects_a_heading_jump_that_implies_an_impossible_turn_rate() -> None:
     noisy = planner.update(0.0, 0.0, heading_deg=90.0)  # implied 900 deg/s
 
     assert first.current_heading_deg == 0.0
-    assert noisy.current_heading_deg == 0.0
+    assert noisy.current_heading_deg is None
+    assert noisy.heading_valid is False
+    assert noisy.reason == "INVALID_HEADING"
 
 
-def test_accepts_a_sustained_heading_change_even_if_it_starts_fast() -> None:
+def test_does_not_accept_a_repeated_impossible_heading_jump_after_time_passes() -> None:
     checkpoints = [{"sequence": 1, "latitude": 1.0, "longitude": 0.0}]
     clock = [0.0]
     planner = CheckpointRoutePlanner(
@@ -148,14 +154,36 @@ def test_accepts_a_sustained_heading_change_even_if_it_starts_fast() -> None:
     planner.update(0.0, 0.0, heading_deg=0.0)
     clock[0] += 0.1
     rejected = planner.update(0.0, 0.0, heading_deg=90.0)
-    # The same new reading keeps coming back; growing dt against the still
-    # -unmoved reference eventually makes the implied rate plausible again
-    # instead of rejecting a real change forever.
+    # Repeating the same fault must not make it valid merely because wall
+    # time passed after the first rejection.
     clock[0] += 1.0
-    accepted = planner.update(0.0, 0.0, heading_deg=90.0)
+    still_rejected = planner.update(0.0, 0.0, heading_deg=90.0)
 
-    assert rejected.current_heading_deg == 0.0
-    assert accepted.current_heading_deg == 90.0
+    assert rejected.current_heading_deg is None
+    assert still_rejected.current_heading_deg is None
+    assert still_rejected.reason == "INVALID_HEADING"
+
+
+def test_explicit_heading_reanchor_accepts_next_validated_baseline() -> None:
+    checkpoints = [{"sequence": 1, "latitude": 1.0, "longitude": 0.0}]
+    clock = [0.0]
+    planner = CheckpointRoutePlanner(
+        checkpoints,
+        switch_radius_m=1.0,
+        max_heading_rate_deg_per_sec=30.0,
+        monotonic=lambda: clock[0],
+    )
+
+    planner.update(0.0, 0.0, heading_deg=161.0)
+    clock[0] += 0.5
+    assert planner.update(0.0, 0.0, heading_deg=355.0).heading_valid is False
+
+    planner.reanchor_heading()
+    reacquired = planner.update(0.0, 0.0, heading_deg=355.0)
+
+    assert reacquired.heading_valid is True
+    assert reacquired.current_heading_deg == pytest.approx(355.0)
+    assert reacquired.reason == "TRACKING"
 
 
 def test_heading_rate_guard_is_disabled_by_default() -> None:

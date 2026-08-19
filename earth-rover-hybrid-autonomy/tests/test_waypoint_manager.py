@@ -26,6 +26,16 @@ def test_reached_does_not_advance_until_report_success():
     assert manager.current_target()["sequence"] == 2
 
 
+def test_reached_latches_when_gps_drifts_back_outside_radius():
+    manager = WaypointManager(CHECKPOINTS, switch_radius_m=15.0, latest_scanned_checkpoint=0)
+
+    assert manager.update(37.0001, 127.0)["reached"] is True
+    drifted = manager.update(37.001, 127.0)
+
+    assert drifted["reached"] is True
+    assert manager.current_target()["sequence"] == 1
+
+
 def test_finishes_after_last_reported():
     manager = WaypointManager(CHECKPOINTS, switch_radius_m=15.0, latest_scanned_checkpoint=1)
 

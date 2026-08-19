@@ -449,6 +449,60 @@ def test_shadow_step_routes_the_locked_localizer_estimate_not_raw_telemetry() ->
     }
 
 
+def test_shadow_step_reanchors_route_after_localizer_heading_reacquisition() -> None:
+    class ReacquiredLocalizer(SpyLocalizer):
+        def __init__(self, locked_estimate=None) -> None:
+            super().__init__(locked_estimate)
+            self.reanchor_pending = True
+
+        @property
+        def heading_valid(self) -> bool:
+            return True
+
+        def consume_heading_reanchor(self) -> bool:
+            pending = self.reanchor_pending
+            self.reanchor_pending = False
+            return pending
+
+        def status(self) -> dict[str, object]:
+            return {
+                "heading_valid": True,
+                "heading_status_reason": "HEADING_REACQUIRED_GYRO_UNTRUSTED",
+            }
+
+    sdk = ReadOnlyFakeSdk()
+    localizer = ReacquiredLocalizer(locked_estimate=(9.0, 8.0, 355.0))
+    planner = CheckpointRoutePlanner(
+        [{"sequence": 1, "latitude": 9.001, "longitude": 8.0}],
+        switch_radius_m=1.0,
+        max_heading_rate_deg_per_sec=30.0,
+    )
+    planner.update(9.0, 8.0, 161.0)
+    clock_values = iter((100.0, 100.01, 100.1))
+    monotonic_values = iter((10.01, 10.03, 10.2))
+
+    step, _ = run_shadow_step(
+        sdk,
+        RecordingPredictor(),
+        frame_index=0,
+        telemetry=None,
+        fetch_telemetry=True,
+        started_monotonic=10.0,
+        checkpoint_sha256="abc",
+        maximum_frame_age_sec=1.0,
+        maximum_telemetry_age_sec=1.0,
+        clock=lambda: next(clock_values),
+        monotonic=lambda: next(monotonic_values),
+        panel_width=100,
+        route_planner=planner,
+        localizer=localizer,
+    )
+
+    assert step.record["navigation"]["heading_valid"] is True
+    assert step.record["navigation"]["current_heading_deg"] == pytest.approx(355.0)
+    assert step.record["navigation"]["reason"] == "TRACKING"
+
+
 def test_corrected_heading_wraps_and_rejects_invalid_values() -> None:
     assert corrected_heading_deg(350.0, 20.0) == pytest.approx(10.0)
     assert corrected_heading_deg(None, 180.0) is None
@@ -631,6 +685,11 @@ def test_browser_bridge_publishes_latest_overlay_and_read_only_status() -> None:
             "score_max": 0.9,
             "image_path_valid": True,
             "image_path_reason": "CONNECTED_HIGH_TRAVERSABILITY_IMAGE_PATH",
+            "geometry_mode": "metric_projected",
+            "camera_projection_applied": True,
+            "image_path_metric_calibrated": True,
+            "calibration_id": "mission1_front_camera_1024x576_2026_08_14",
+            "calibration_sha256_prefix": "1a0b3adefbeaea3e",
             "sdk_clock_offset_hours": 9,
         },
     )
@@ -640,8 +699,68 @@ def test_browser_bridge_publishes_latest_overlay_and_read_only_status() -> None:
     assert snapshot.status["frame_index"] == 3
     assert snapshot.status["command_transmitted"] is False
     assert snapshot.status["sdk_clock_offset_hours"] == 9
+    assert snapshot.status["geometry_mode"] == "metric_projected"
+    assert snapshot.status["camera_projection_applied"] is True
+    assert snapshot.status["image_path_metric_calibrated"] is True
+    assert (
+        snapshot.status["calibration_id"]
+        == "mission1_front_camera_1024x576_2026_08_14"
+    )
     assert snapshot.jpeg is not None
     assert snapshot.jpeg.startswith(b"\xff\xd8")
+
+
+def test_shadow_step_and_dashboard_surface_checkpoint_metadata() -> None:
+    sdk = ReadOnlyFakeSdk()
+    checkpoint_metadata = {
+        "filename": "best_sam_tp.pt",
+        "sha256_prefix": "99f0efab7b40d532",
+        "backend": "hf_sam2",
+        "model_config_id": "sam2_hf_tiny",
+    }
+    clock_values = iter((100.0, 100.01, 100.1))
+    monotonic_values = iter((10.01, 10.03, 10.2))
+
+    step, _ = run_shadow_step(
+        sdk,
+        RecordingPredictor(),
+        frame_index=0,
+        telemetry=None,
+        fetch_telemetry=False,
+        started_monotonic=10.0,
+        checkpoint_sha256="99f0efab7b40d532e31909a77f1e9c4d1a0be3a534b96c7d769850cc046b951d",
+        maximum_frame_age_sec=1.0,
+        maximum_telemetry_age_sec=1.0,
+        clock=lambda: next(clock_values),
+        monotonic=lambda: next(monotonic_values),
+        panel_width=100,
+        checkpoint_metadata=checkpoint_metadata,
+    )
+
+    assert step.record["checkpoint"] == checkpoint_metadata
+
+    store = DashboardSnapshotStore()
+    store.publish(step.overlay_bgr, step.record)
+    assert store.get().status["checkpoint"] == checkpoint_metadata
+
+
+def test_dashboard_surfaces_checkpoint_before_first_frame_and_during_error() -> None:
+    checkpoint_metadata = {
+        "filename": "best_sam_tp.pt",
+        "sha256_prefix": "99f0efab7b40d532",
+        "backend": "hf_sam2",
+        "model_config_id": "sam2_hf_tiny",
+    }
+    store = DashboardSnapshotStore(checkpoint_metadata)
+
+    assert store.get().status["state"] == "STARTING"
+    assert store.get().status["checkpoint"] == checkpoint_metadata
+
+    store.publish_error(RuntimeError("front frame unavailable"))
+
+    status = store.get().status
+    assert status["state"] == "ERROR"
+    assert status["checkpoint"] == checkpoint_metadata
 
 
 def test_compose_traversability_overlay_preserves_source_geometry() -> None:
@@ -652,3 +771,19 @@ def test_compose_traversability_overlay_preserves_source_geometry() -> None:
 
     assert overlay.shape == image.shape
     assert overlay.dtype == np.uint8
+
+
+def test_dashboard_displays_shared_candidate_rejection_reason() -> None:
+    from training.sam_tp_sdk_shadow import _dashboard_path_reason
+
+    record = {
+        "image_path_reason": "MOTION_PRIMITIVE_NEAR_FIELD_UNSAFE",
+        "planner": {
+            "candidate_scores": [
+                {"hard_rejected": True, "reject_reason": "NO_VALID_CALIBRATION"},
+                {"hard_rejected": True, "reject_reason": "NO_VALID_CALIBRATION"},
+            ]
+        },
+    }
+
+    assert _dashboard_path_reason(record) == "NO_VALID_CALIBRATION"

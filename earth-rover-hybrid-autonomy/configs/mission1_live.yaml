@@ -1,59 +1,144 @@
+camera_calibration:
+  # Validated 1024x576 front-camera calibration. Metric planning still
+  # fails closed if the live frame resolution differs from this file.
+  path: "configs/calibration/mission1_camera.yaml"
+
 mission1_autonomy:
+  # Refuse planner status from a shadow process that was accidentally started
+  # without this live profile. This closes the image_heuristic bypass path.
+  require_metric_projection: true
   loop_hz: 5.0
   sam_status_url: "http://127.0.0.1:8001/status"
   sam_timeout_sec: 0.5
   maximum_sam_age_sec: 2.5
 
-  # Low-speed live limits with enough command authority to clear the rover's
-  # observed drive/steering deadzone. These remain well below teleop caps and
-  # still require an attended test because LOCAL PATH is image-space.
-  base_linear: 0.20
+  # Keep the control envelope from the attended uncalibrated tests while
+  # changing only the local-path geometry to calibrated metric projection.
+  base_linear: 0.12
   minimum_linear: 0.12
-  max_linear: 0.3
-  heading_kp: 0.55
-  max_angular: 0.30
+  max_linear: 0.12
+  heading_kp: 0.30
+  max_angular: 0.22
   stop_forward_heading_deg: 50.0
   rotate_to_goal_heading_deg: 50.0
   rotate_exit_threshold_deg: 20.0
-  rotate_to_goal_angular: 0.28
+  rotate_to_goal_angular: 0.15
+  minimum_rotate_angular: 0.12
+  # The camera/planner/control loop is too delayed for stable simultaneous
+  # steering. Stop, pulse-rotate on confirmed fresh frames, then issue a
+  # short straight-only burst before stopping to observe and replan again.
+  enable_stop_turn_go: true
+  stop_turn_heading_threshold_deg: 7.5
+  stop_turn_confirm_frames: 2
+  stop_turn_stationary_confirm_samples: 2
+  stop_turn_stop_timeout_sec: 3.0
+  stop_turn_rotate_angular: 0.12
+  stop_turn_rotate_pulse_sec: 0.30
+  stop_turn_settle_sec: 0.50
+  stop_turn_drive_burst_sec: 0.60
+  stop_turn_max_pulses: 8
+  stop_turn_max_total_sec: 12.0
+  stop_turn_cooldown_sec: 3.0
+  # If a near obstacle rejects every forward metric trajectory, use the
+  # independent image side sectors below to choose a bounded rotate escape.
+  # Ambiguous/BOTH_UNSAFE evidence still fails closed without rotating.
+  enable_rotate_escape: true
+  rotate_escape_angular: 0.22
+  rotate_escape_stop_confirm_ticks: 2
+  rotate_escape_stationary_speed_threshold: 0.03
+  rotate_escape_stationary_rpm_threshold: 1.0
+  rotate_escape_stationary_confirm_samples: 2
+  rotate_escape_stop_timeout_sec: 3.0
+  rotate_escape_direction_confirm_frames: 2
+  rotate_escape_pulse_sec: 0.80
+  rotate_escape_motion_response_timeout_sec: 1.50
+  rotate_escape_motion_rpm_threshold: 1.0
+  rotate_escape_motion_heading_delta_deg: 1.5
+  rotate_escape_settle_sec: 0.50
+  rotate_escape_max_pulses: 6
+  rotate_escape_max_total_sec: 12.0
+  rotate_escape_safe_frame_confirm_count: 3
+  rotate_escape_cooldown_sec: 5.0
   minimum_path_score: 0.55
   checkpoint_report_cooldown_sec: 2.0
   checkpoint_transition_stop_sec: 0.4
+  # Require distinct SAM frames to agree before accepting a new checkpoint.
+  # A single stale/transient route response must never reverse live guidance.
+  target_sequence_confirm_frames: 3
   transient_invalid_grace_sec: 0.8
   max_plan_age_sec: 1.5
   path_invalid_grace_ticks: 4
+  path_recovery_confirm_frames: 3
   held_path_linear_scale: 0.45
   partial_path_linear_scale: 0.60
   relaxed_path_linear_scale: 0.75
   confidence_slowdown_gain: 0.70
   curvature_slowdown_gain: 0.65
   angular_deadband: 0.03
-  # When every local-path candidate is blocked (near-field unsafe), rotate
-  # in place toward whichever side looked least blocked instead of just
-  # stopping in front of the obstacle -- the local planner only evaluates
-  # curves drawn on the current camera frame, so it needs the rover to
-  # physically turn before a clear direction exists to score at all. Give up
-  # and SAFETY_STOP after this many seconds if nothing opens up.
+  # The legacy candidate-score search does not have independent side-space
+  # evidence. Keep it disabled; bounded rotate_escape above owns recovery.
+  enable_search_rotate: false
   search_rotate_angular: 0.22
   search_rotate_timeout_sec: 10.0
 
 control:
   linear_min: 0.0
-  linear_max: 0.3
-  angular_min: -0.30
-  angular_max: 0.30
+  linear_max: 0.12
+  angular_min: -0.22
+  angular_max: 0.22
   command_smoothing_alpha: 0.25
   max_linear_delta_per_sec: 0.3
-  max_angular_delta_per_sec: 0.50
+  max_angular_delta_per_sec: 0.30
   reverse_angular_sign_slowdown: true
   angular_deadband: 0.03
 
+navigation:
+  # max_angular is capped at 0.15 in this attended profile, so retain the
+  # physically plausible heading-rate gate proven in uncalibrated tests.
+  heading_filter_alpha: 0.2
+  max_heading_rate_deg_per_sec: 30.0
+  max_heading_sample_interval_sec: 0.5
+
+localization:
+  heading_outlier_reject_deg: 35.0
+  heading_recovery_streak: 3
+  heading_recovery_max_delta_deg: 8.0
+
 planner:
   mode: motion_primitives
-  # Finer steps near center let the planner express a small correction
-  # (e.g. +5-10 deg) instead of jumping straight to +/-15, which was causing
-  # it to commit to a much sharper turn than the situation needed.
-  candidate_headings_deg: [-45, -30, -20, -10, -5, 0, 5, 10, 20, 30, 45]
+  # Live driving uses real projected rover-frame footprints, not the
+  # image-space heuristic curves below candidate_headings_deg drives (that
+  # legacy/replay path stays available only under geometry_mode:
+  # image_heuristic, e.g. for --planner-mode connected_path A/B runs).
+  # Fails closed without a validated calibration at camera_calibration.path
+  # above -- see the comment there.
+  geometry_mode: metric_projected
+  # Rover-frame constant-curvature candidates sampled by
+  # ConstantCurvatureTrajectorySampler and projected through calibration.
+  # Same curvature set as trajectory_sampler.DEFAULT_CURVATURES and the same
+  # horizon/interval/width/margin already used for the provisional Phase 1
+  # trajectories in training/sam_tp_sdk_shadow.py -- made explicit and
+  # validated here rather than left as an unvalidated module constant.
+  # With a 2 m horizon these produce terminal headings
+  # [-30,-20,-10,-5,0,5,10,20,30] degrees, so every driving transition has
+  # an adjacent candidate within max_candidate_switch_deg=10.
+  curvatures: [0.2617993878, 0.1745329252, 0.0872664626, 0.0436332313, 0.0, -0.0436332313, -0.0872664626, -0.1745329252, -0.2617993878]
+  horizon_m: 2.0
+  sample_interval_m: 0.1
+  # Measured wheel-center track is 0.156 m. A 0.05 m margin on each side
+  # gives a 0.256 m effective corridor instead of the previous 0.6 m corridor
+  # that caused every candidate to share the same obstacle pixels.
+  rover_width_m: 0.156
+  safety_margin_m: 0.05
+  min_projected_coverage_ratio: 0.5
+  near_field_horizon_fraction: 0.35
+  # Retained for the image_heuristic/legacy path (--planner-mode
+  # connected_path A/B runs) and validated unconditionally regardless of
+  # geometry_mode. Finer steps near center let the planner express a small
+  # correction (e.g. +5-10 deg) instead of jumping straight to +/-15, which
+  # was causing it to commit to a much sharper turn than the situation
+  # needed.
+  candidate_headings_deg: [-30, -20, -10, -5, 0, 5, 10, 20, 30]
   traversability_weight: 1.0
   goal_heading_weight: 0.7
   continuity_weight: 0.45
@@ -104,3 +189,19 @@ planner:
   # in place. Back to requiring 2 consecutive ticks of agreement before
   # switching; min_candidate_commit_sec above still keeps reaction fast.
   switch_confirm_count: 2
+  unsafe_switch_confirm_count: 3
+  max_candidate_switch_deg: 10.0
+  # Independent LEFT/RIGHT traversability evidence used only when all metric
+  # forward candidates are hard-rejected. It does not weaken candidate or
+  # near-field collision rejection.
+  side_sector_enabled: true
+  side_sector_top_ratio: 0.45
+  side_sector_bottom_exclude_ratio: 0.08
+  side_sector_left_width_ratio: 0.30
+  side_sector_right_width_ratio: 0.30
+  side_sector_low_percentile: 20
+  side_sector_traversable_score_threshold: 0.55
+  side_sector_min_traversable_ratio: 0.55
+  side_sector_min_valid_pixel_ratio: 0.4
+  side_sector_stop_score: 0.5
+  side_sector_margin: 0.12

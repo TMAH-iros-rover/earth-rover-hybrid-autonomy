@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+RESEARCH_ROOT="$PROJECT_ROOT/research"
 DATASET_ROOT="${DATASET_ROOT:-$HOME/datasets/output_rides_0}"
 MANIFEST_PATH="${MANIFEST_PATH:-$HOME/datasets/manifests/frodobots_2k_phase2/full_dataset/manifest.csv}"
 OUTPUT_DIR="${OUTPUT_DIR:-$HOME/datasets/outputs/frodobots_2k_phase3/tiny_overfit}"
@@ -42,13 +43,13 @@ print(digest.hexdigest())
 PY
 }
 
-cd "$ROOT_DIR"
+cd "$PROJECT_ROOT"
 
 echo "[1/4] Running focused Phase 3 tests"
 PYTHONDONTWRITEBYTECODE=1 "$PYTHON" -m pytest \
     -p no:cacheprovider -q \
-    tests/test_phase3_tiny_overfit.py \
-    tests/test_action_labels.py
+    research/tests/test_phase3_tiny_overfit.py \
+    research/tests/test_action_labels.py
 
 echo "[2/4] Checking CUDA and recording raw dataset fingerprint"
 "$PYTHON" - <<'PY'
@@ -62,7 +63,7 @@ before_fingerprint="$(dataset_fingerprint)"
 
 echo "[3/4] Running the 200-sample ResNet18 tiny-overfit gate"
 training_status=0
-PYTHONDONTWRITEBYTECODE=1 "$PYTHON" training/train_tiny_overfit.py \
+PYTHONDONTWRITEBYTECODE=1 "$PYTHON" research/training/train_tiny_overfit.py \
     --dataset-root "$DATASET_ROOT" \
     --manifest "$MANIFEST_PATH" \
     --output-dir "$OUTPUT_DIR" \

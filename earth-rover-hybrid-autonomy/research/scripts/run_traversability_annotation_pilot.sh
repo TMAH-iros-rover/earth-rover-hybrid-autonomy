@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+RESEARCH_ROOT="$PROJECT_ROOT/research"
 SOURCE_BUNDLE="${SOURCE_BUNDLE:-$HOME/datasets/review_bundles/traversability_pilot_v1}"
 OUTPUT_DIR="${OUTPUT_DIR:-$HOME/datasets/generated/traversability_dataset_v1/pilot_20}"
 SAMPLE_COUNT="${SAMPLE_COUNT:-20}"
@@ -41,19 +42,19 @@ print(digest.hexdigest())
 PY
 }
 
-cd "$ROOT_DIR"
+cd "$PROJECT_ROOT"
 
 echo "[1/4] Running focused annotation-pipeline tests"
 PYTHONDONTWRITEBYTECODE=1 "$PYTHON" -m pytest \
     -p no:cacheprovider -q \
-    tests/test_traversability_annotation.py \
-    tests/test_traversability_review.py
+    research/tests/test_traversability_annotation.py \
+    research/tests/test_traversability_review.py
 
 echo "[2/4] Recording source pseudo-label bundle fingerprint"
 before_fingerprint="$(source_fingerprint)"
 
 echo "[3/4] Building the 20-frame CVAT annotation pilot"
-PYTHONDONTWRITEBYTECODE=1 "$PYTHON" training/build_traversability_annotation_pilot.py \
+PYTHONDONTWRITEBYTECODE=1 "$PYTHON" research/training/build_traversability_annotation_pilot.py \
     --source-pseudo-bundle "$SOURCE_BUNDLE" \
     --output-dir "$OUTPUT_DIR" \
     --sample-count "$SAMPLE_COUNT" \

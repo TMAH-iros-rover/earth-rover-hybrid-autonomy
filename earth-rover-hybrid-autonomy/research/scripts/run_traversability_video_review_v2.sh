@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+RESEARCH_ROOT="$PROJECT_ROOT/research"
 CHECKPOINT="${CHECKPOINT:-$HOME/datasets/experiments/traversability_segformer_b0_v2/full_training/segformer_b0_best.pt}"
-CONFIG="${CONFIG:-$ROOT_DIR/configs/traversability_segformer_b0_v2.yaml}"
+CONFIG="${CONFIG:-$RESEARCH_ROOT/configs/traversability_segformer_b0_v2.yaml}"
 OUTPUT_DIR="${OUTPUT_DIR:-$HOME/datasets/review_bundles/traversability_video_review_v2}"
 DATASETS="${DATASETS:-all}"
 LOW_CONFIDENCE_THRESHOLD="${LOW_CONFIDENCE_THRESHOLD:-}"
@@ -29,11 +30,11 @@ if [[ "$ffmpeg_encoders" != *libx264* ]]; then
     exit 1
 fi
 
-cd "$ROOT_DIR"
+cd "$PROJECT_ROOT"
 echo "[1/3] Running focused synthetic video-review tests"
 PYTHONDONTWRITEBYTECODE=1 "$PYTHON" -m pytest -p no:cacheprovider -q \
-    tests/test_traversability_video_review_v2.py \
-    tests/test_traversability_checkpoint_schema.py
+    research/tests/test_traversability_video_review_v2.py \
+    research/tests/test_traversability_checkpoint_schema.py
 
 echo "[2/3] Running offline v2 inference for dataset selection: $DATASETS"
 arguments=(
@@ -49,7 +50,7 @@ fi
 if [[ "$OVERWRITE" == "true" ]]; then
     arguments+=(--overwrite)
 fi
-PYTHONDONTWRITEBYTECODE=1 "$PYTHON" training/run_traversability_video_review_v2.py "${arguments[@]}"
+PYTHONDONTWRITEBYTECODE=1 "$PYTHON" research/training/run_traversability_video_review_v2.py "${arguments[@]}"
 
 echo "[3/3] Verifying H.264 artifacts and Git exclusion"
 "$PYTHON" - "$OUTPUT_DIR" <<'PY'

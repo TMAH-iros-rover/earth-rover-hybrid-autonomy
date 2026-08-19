@@ -30,7 +30,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--config", default=str(ROOT / "configs/default.yaml"))
     parser.add_argument(
-        "--mission-config", default=str(ROOT / "configs/mission1_live.yaml")
+        "--mission-config",
+        default=str(ROOT / "configs/mission1_live.yaml"),
     )
     parser.add_argument("--enable-live-control", action="store_true")
     parser.add_argument("--status-host", default="127.0.0.1")

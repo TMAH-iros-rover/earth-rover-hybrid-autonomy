@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+RESEARCH_ROOT="$PROJECT_ROOT/research"
 DATASET_ROOT="${DATASET_ROOT:-$HOME/datasets/output_rides_0}"
 MANIFEST_PATH="${MANIFEST_PATH:-$HOME/datasets/manifests/frodobots_2k_phase2/full_dataset/manifest.csv}"
 TINY_REPORT="${TINY_REPORT:-$HOME/datasets/outputs/frodobots_2k_phase3/tiny_overfit/tiny_overfit_report.json}"
@@ -52,13 +53,13 @@ print(digest.hexdigest())
 PY
 }
 
-cd "$ROOT_DIR"
+cd "$PROJECT_ROOT"
 
 echo "[1/4] Running focused small-baseline tests"
 PYTHONDONTWRITEBYTECODE=1 "$PYTHON" -m pytest \
     -p no:cacheprovider -q \
-    tests/test_phase3_small_baseline.py \
-    tests/test_phase3_tiny_overfit.py
+    research/tests/test_phase3_small_baseline.py \
+    research/tests/test_phase3_tiny_overfit.py
 
 echo "[2/4] Checking CUDA and recording raw dataset fingerprint"
 "$PYTHON" - <<'PY'
@@ -72,7 +73,7 @@ before_fingerprint="$(dataset_fingerprint)"
 
 echo "[3/4] Training the bounded 10/2/2 ride-level baseline"
 training_status=0
-PYTHONDONTWRITEBYTECODE=1 "$PYTHON" training/train_small_baseline.py \
+PYTHONDONTWRITEBYTECODE=1 "$PYTHON" research/training/train_small_baseline.py \
     --dataset-root "$DATASET_ROOT" \
     --manifest "$MANIFEST_PATH" \
     --output-dir "$OUTPUT_DIR" \

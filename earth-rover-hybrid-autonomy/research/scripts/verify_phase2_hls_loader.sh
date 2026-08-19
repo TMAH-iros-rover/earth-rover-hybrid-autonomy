@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+RESEARCH_ROOT="$PROJECT_ROOT/research"
 DATASET_ROOT="${DATASET_ROOT:-$HOME/datasets/output_rides_0}"
 PHASE1_DIR="${PHASE1_DIR:-$HOME/datasets/manifests/frodobots_2k_phase1/dell_verification_3rides}"
 MANIFEST_PATH="$PHASE1_DIR/manifest.csv"
@@ -37,12 +38,12 @@ print(digest.hexdigest())
 PY
 }
 
-cd "$ROOT_DIR"
+cd "$PROJECT_ROOT"
 
 echo "[1/5] Running focused Phase 2 tests"
 PYTHONDONTWRITEBYTECODE=1 "$PYTHON" -m pytest \
     -p no:cacheprovider -q \
-    tests/test_frodobots_2k_dataset.py
+    research/tests/test_frodobots_2k_dataset.py
 
 echo "[2/5] Checking the Phase 1 manifest"
 if [[ ! -f "$MANIFEST_PATH" ]]; then
@@ -54,7 +55,7 @@ echo "[3/5] Recording raw dataset fingerprint"
 before_fingerprint="$(dataset_fingerprint)"
 
 echo "[4/5] Decoding and visualizing 20 aligned samples"
-if ! PYTHONDONTWRITEBYTECODE=1 "$PYTHON" training/verify_frodobots_2k_hls.py \
+if ! PYTHONDONTWRITEBYTECODE=1 "$PYTHON" research/training/verify_frodobots_2k_hls.py \
     --dataset-root "$DATASET_ROOT" \
     --manifest "$MANIFEST_PATH" \
     --output-dir "$OUTPUT_DIR" \

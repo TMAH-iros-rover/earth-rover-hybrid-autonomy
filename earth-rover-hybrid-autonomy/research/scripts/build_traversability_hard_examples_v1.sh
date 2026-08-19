@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+RESEARCH_ROOT="$PROJECT_ROOT/research"
 DATASET_ROOT="${DATASET_ROOT:-$HOME/datasets/output_rides_0}"
 TEMPORAL_BUNDLE="${TEMPORAL_BUNDLE:-$HOME/datasets/review_bundles/traversability_temporal_v1}"
 APPROVED_DATASET="${APPROVED_DATASET:-$HOME/datasets/generated/traversability_dataset_v1/approved_120_v1}"
@@ -59,11 +60,11 @@ print(digest.hexdigest())
 PY
 }
 
-cd "$ROOT_DIR"
+cd "$PROJECT_ROOT"
 before_git_status="$(git status --porcelain)"
 
 echo "[1/6] Running focused hard-example, annotation, and temporal tests"
-PYTHONDONTWRITEBYTECODE=1 "$PYTHON" -m pytest -p no:cacheprovider -q tests/test_traversability_hard_examples.py tests/test_traversability_annotation.py tests/test_traversability_temporal_inference.py
+PYTHONDONTWRITEBYTECODE=1 "$PYTHON" -m pytest -p no:cacheprovider -q research/tests/test_traversability_hard_examples.py research/tests/test_traversability_annotation.py research/tests/test_traversability_temporal_inference.py
 
 echo "[2/6] Checking CUDA and recording immutable fingerprints"
 "$PYTHON" - <<'PY'
@@ -78,7 +79,7 @@ before_approved="$(tree_fingerprint "$APPROVED_DATASET")"
 before_checkpoint="$(sha256sum "$CHECKPOINT" | awk '{print $1}')"
 
 echo "[3/6] Mining v1 temporal errors and building the targeted 24-image CVAT bundle"
-PYTHONDONTWRITEBYTECODE=1 "$PYTHON" training/build_traversability_hard_examples.py --dataset-root "$DATASET_ROOT" --temporal-bundle "$TEMPORAL_BUNDLE" --approved-dataset "$APPROVED_DATASET" --checkpoint "$CHECKPOINT" --output-dir "$OUTPUT_DIR" --seed "$SEED" --require-cuda
+PYTHONDONTWRITEBYTECODE=1 "$PYTHON" research/training/build_traversability_hard_examples.py --dataset-root "$DATASET_ROOT" --temporal-bundle "$TEMPORAL_BUNDLE" --approved-dataset "$APPROVED_DATASET" --checkpoint "$CHECKPOINT" --output-dir "$OUTPUT_DIR" --seed "$SEED" --require-cuda
 
 echo "[4/6] Validating count, provenance, split isolation, and v1 seed masks"
 "$PYTHON" - "$OUTPUT_DIR" "$APPROVED_DATASET" "$TARGET_COUNT" <<'PY'
