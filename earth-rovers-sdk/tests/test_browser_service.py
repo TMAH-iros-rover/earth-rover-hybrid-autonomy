@@ -126,6 +126,25 @@ def test_wait_for_frame_awaits_async_browser_result(monkeypatch) -> None:
     assert service.page.calls == 3
 
 
+def test_frame_metadata_returns_source_identity_from_browser_page() -> None:
+    expected = {
+        "source_frame_id": "session:1000:42:10.0",
+        "source_media_time_sec": 10.0,
+        "source_total_video_frames": 42,
+    }
+
+    class FakePage:
+        async def evaluate(self, script, uid):
+            assert "getLastFrameMetadata" in script
+            assert uid == 1000
+            return expected
+
+    service = browser_service.BrowserService()
+    service.page = FakePage()
+
+    assert asyncio.run(service.frame_metadata(1000)) == expected
+
+
 def test_diagnostics_distinguish_channel_users_from_published_tracks() -> None:
     source = Path(browser_service.__file__).read_text(encoding="utf-8")
     rtc_source = Path("static/basicVideoCall.js").read_text(encoding="utf-8")

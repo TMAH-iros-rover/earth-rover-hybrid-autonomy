@@ -45,18 +45,21 @@ def test_mission1_live_profile_has_bounded_deadzone_compensation():
     assert 0.0 < mission["minimum_linear"] <= mission["base_linear"]
     assert mission["base_linear"] <= mission["max_linear"] <= 0.30
     assert control["linear_max"] == mission["max_linear"]
-    assert control["angular_max"] == mission["max_angular"] <= 0.30
+    assert control["angular_max"] == mission["max_angular"] <= 0.40
     assert max(abs(value) for value in config["planner"]["candidate_headings_deg"]) <= 30
     assert mission["require_metric_projection"] is True
     assert mission["minimum_linear"] == mission["max_linear"] == 0.12
-    assert mission["minimum_rotate_angular"] == 0.12
-    assert control["angular_max"] == mission["max_angular"] == 0.22
+    assert mission["minimum_rotate_angular"] == 0.40
+    assert control["angular_max"] == mission["max_angular"] == 0.40
     assert mission["enable_stop_turn_go"] is True
+    assert mission["stop_turn_require_motion_response"] is True
     assert mission["minimum_rotate_angular"] <= mission["stop_turn_rotate_angular"] <= mission["max_angular"]
     assert mission["stop_turn_heading_threshold_deg"] < 10.0
     assert mission["stop_turn_rotate_pulse_sec"] <= mission["stop_turn_settle_sec"]
     assert mission["path_recovery_confirm_frames"] >= 3
-    assert config["navigation"]["max_heading_rate_deg_per_sec"] <= 30.0
+    # Live actuator evidence requires at least 70 deg/s; retain a bounded
+    # margin below the historical one-sample compass-fault rates.
+    assert 70.0 <= config["navigation"]["max_heading_rate_deg_per_sec"] <= 90.0
 
 
 def test_mission1_live_profile_is_metric_projected_with_live_calibration():
@@ -164,6 +167,10 @@ def test_mission1_live_profile_explicitly_enables_bounded_rotate_escape():
     mission = Mission1ControlConfig.from_dict(config)
 
     assert planner.side_sector_enabled is True
+    assert planner.side_sector_top_ratio == 0.55
+    assert planner.side_sector_stop_score == 0.15
+    assert planner.side_sector_min_traversable_ratio == 0.70
+    assert planner.side_sector_margin == 0.05
     assert mission.enable_rotate_escape is True
     assert mission.enable_stop_turn_go is True
     assert mission.enable_search_rotate is False

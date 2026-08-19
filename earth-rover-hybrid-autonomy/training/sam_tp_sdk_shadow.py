@@ -122,6 +122,8 @@ def run_shadow_step(
     image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
     if localizer is not None and localizer.is_locked:
         fused_lat, fused_lon, fused_heading_deg = localizer.current_estimate()
+        if not bool(getattr(localizer, "position_valid", True)):
+            fused_lat = fused_lon = None
         if not bool(getattr(localizer, "heading_valid", True)):
             fused_heading_deg = None
         elif route_planner is not None:
@@ -210,6 +212,7 @@ def run_shadow_step(
             )
         )
     )
+    frame_duplicate = not bool(frame.source_frame_new)
     telemetry_age_sec = (
         finished - float(telemetry.timestamp) if telemetry is not None else None
     )
@@ -220,7 +223,9 @@ def run_shadow_step(
         or telemetry_age_sec < 0.0
         or telemetry_age_sec > maximum_telemetry_age_sec
     )
-    if frame_stale:
+    if frame_duplicate:
+        shadow_state = "DUPLICATE_FRAME"
+    elif frame_stale:
         shadow_state = "STALE_FRAME"
     elif telemetry_error is not None and telemetry is None:
         shadow_state = "WAITING_TELEMETRY"
@@ -236,6 +241,9 @@ def run_shadow_step(
         "frame_received_timestamp": frame_received,
         "local_frame_timestamp": frame.timestamp,
         "sdk_frame_timestamp": frame.sdk_timestamp,
+        "source_frame_id": frame.source_frame_id,
+        "source_media_time_sec": frame.source_media_time_sec,
+        "source_frame_new": frame.source_frame_new,
         "local_frame_age_sec": local_frame_age_sec,
         "sdk_frame_age_sec": sdk_frame_age_sec,
         "sdk_frame_timestamp_usable": sdk_frame_timestamp_usable,
@@ -311,7 +319,7 @@ def run_shadow_step(
             primitive_plan.image_path_metric_calibrated if primitive_plan is not None else False
         ),
         "image_path_experimental_control_input": True,
-        "prediction_valid": not frame_stale,
+        "prediction_valid": not frame_stale and not frame_duplicate,
         "telemetry_valid": telemetry_error is None and not telemetry_stale,
         "shadow_state": shadow_state,
         "checkpoint_sha256": checkpoint_sha256,

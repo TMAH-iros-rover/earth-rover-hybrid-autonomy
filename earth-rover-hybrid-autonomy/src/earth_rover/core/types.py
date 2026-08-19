@@ -27,6 +27,9 @@ class FrameData:
     image: np.ndarray
     source: str
     sdk_timestamp: Optional[float] = None
+    source_frame_id: Optional[str] = None
+    source_media_time_sec: Optional[float] = None
+    source_frame_new: bool = True
 
 
 @dataclass

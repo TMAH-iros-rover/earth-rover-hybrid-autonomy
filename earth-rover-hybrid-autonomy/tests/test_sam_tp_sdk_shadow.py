@@ -221,6 +221,41 @@ def test_shadow_step_marks_old_frame_stale_without_command() -> None:
     assert step.record["command_transmitted"] is False
 
 
+def test_shadow_step_rejects_duplicate_source_frame_without_command() -> None:
+    sdk = ReadOnlyFakeSdk()
+    sdk.get_front_frame = lambda: FrameData(
+        timestamp=99.9,
+        image=sdk.image.copy(),
+        source="front",
+        sdk_timestamp=99.9,
+        source_frame_id="session:1000:42:10.0",
+        source_media_time_sec=10.0,
+        source_frame_new=False,
+    )
+    clock_values = iter((100.0, 100.01, 100.1))
+    monotonic_values = iter((10.01, 10.03, 10.2))
+
+    step, _ = run_shadow_step(
+        sdk,
+        RecordingPredictor(),
+        frame_index=1,
+        telemetry=None,
+        fetch_telemetry=False,
+        started_monotonic=10.0,
+        checkpoint_sha256="abc",
+        maximum_frame_age_sec=1.0,
+        maximum_telemetry_age_sec=1.0,
+        clock=lambda: next(clock_values),
+        monotonic=lambda: next(monotonic_values),
+        panel_width=100,
+    )
+
+    assert step.record["shadow_state"] == "DUPLICATE_FRAME"
+    assert step.record["prediction_valid"] is False
+    assert step.record["source_frame_new"] is False
+    assert step.record["command_transmitted"] is False
+
+
 def test_shadow_step_uses_global_heading_to_bias_read_only_local_path() -> None:
     sdk = ReadOnlyFakeSdk()
     sdk.image = np.zeros((120, 200, 3), dtype=np.uint8)

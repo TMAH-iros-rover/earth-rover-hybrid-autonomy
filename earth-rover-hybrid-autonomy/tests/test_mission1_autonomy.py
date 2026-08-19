@@ -56,6 +56,7 @@ def valid_sam(**overrides):
         "ready": True,
         "state": "CLEAR",
         "published_timestamp": 100.0,
+        "frame_index": 1,
         "path_valid": True,
         "path_reason": "GPS_HEADING_ALIGNED_TRAVERSABLE_PATH",
         "path_mean_score": 0.80,
@@ -1319,6 +1320,90 @@ def test_stop_turn_go_stops_then_pulse_rotates_without_linear_motion():
     assert sdk.commands[-1].angular == -0.12
 
 
+def test_stop_turn_go_motion_gate_aborts_unresponsive_rotate_actuator():
+    sdk = FakeSdk(active=True)
+    clock = Clock()
+    sam = LiveSam(
+        safe_sam_with_side_sector(frame_index=1, heading_deg=20.0), clock
+    )
+    autonomy = controller(
+        sdk,
+        sam,
+        clock,
+        settings=stop_turn_go_settings(
+            stop_turn_require_motion_response=True,
+            stop_turn_motion_response_timeout_sec=0.6,
+        ),
+    )
+
+    autonomy.tick()
+    for frame_index in (2, 3):
+        sam.base_payload = safe_sam_with_side_sector(
+            frame_index=frame_index,
+            heading_deg=20.0,
+            telemetry_timestamp=float(frame_index),
+        )
+        clock.value += 0.2
+        autonomy.tick()
+    clock.value += 0.2
+    assert autonomy.tick()["state"] == "STG_ROTATE_RIGHT"
+    clock.value += 0.3
+    still_waiting = autonomy.tick()
+    clock.value += 0.3
+    settling = autonomy.tick()
+    clock.value += 0.4
+    aborted = autonomy.tick()
+
+    assert still_waiting["state"] == settling["state"] == "STG_ROTATE_SETTLE"
+    assert still_waiting["angular"] == settling["angular"] == 0.0
+    assert settling["stop_turn_go"]["motion_observed"] is False
+    assert aborted["state"] == "STG_SAFETY_STOP"
+    assert "actuator did not respond" in aborted["reason"]
+    assert aborted["linear"] == aborted["angular"] == 0.0
+
+
+def test_stop_turn_go_motion_gate_accepts_fresh_rpm_response():
+    sdk = FakeSdk(active=True)
+    clock = Clock()
+    sam = LiveSam(
+        safe_sam_with_side_sector(frame_index=1, heading_deg=20.0), clock
+    )
+    autonomy = controller(
+        sdk,
+        sam,
+        clock,
+        settings=stop_turn_go_settings(
+            stop_turn_require_motion_response=True,
+            stop_turn_motion_response_timeout_sec=0.8,
+        ),
+    )
+
+    autonomy.tick()
+    for frame_index in (2, 3):
+        sam.base_payload = safe_sam_with_side_sector(
+            frame_index=frame_index,
+            heading_deg=20.0,
+            telemetry_timestamp=float(frame_index),
+        )
+        clock.value += 0.2
+        autonomy.tick()
+    clock.value += 0.2
+    assert autonomy.tick()["state"] == "STG_ROTATE_RIGHT"
+
+    sam.base_payload = safe_sam_with_side_sector(
+        frame_index=4,
+        heading_deg=20.0,
+        telemetry_timestamp=4.0,
+        stationary=False,
+    )
+    clock.value += 0.3
+    settled = autonomy.tick()
+
+    assert settled["state"] == "STG_ROTATE_SETTLE"
+    assert settled["stop_turn_go"]["motion_observed"] is True
+    assert settled["stop_turn_go"]["max_abs_rpm"] == pytest.approx(5.0)
+
+
 def test_stop_turn_go_requires_distinct_frames_before_driving_straight():
     sdk = FakeSdk(active=True)
     clock = Clock()
@@ -1347,6 +1432,111 @@ def test_stop_turn_go_requires_distinct_frames_before_driving_straight():
     assert driving["state"] == "STG_DRIVE_STRAIGHT"
     assert driving["linear"] == 0.06
     assert driving["angular"] == 0.0
+
+
+def test_stop_turn_go_global_heading_blocks_opposite_local_straight_drive():
+    sdk = FakeSdk(active=True)
+    clock = Clock()
+    navigation = valid_sam()["navigation"] | {"heading_error_deg": 170.0}
+    sam = LiveSam(
+        safe_sam_with_side_sector(
+            frame_index=1,
+            heading_deg=0.0,
+            navigation=navigation,
+        ),
+        clock,
+    )
+    autonomy = controller(sdk, sam, clock, settings=stop_turn_go_settings())
+
+    states = []
+    for frame_index in range(1, 5):
+        sam.base_payload = safe_sam_with_side_sector(
+            frame_index=frame_index,
+            heading_deg=0.0,
+            telemetry_timestamp=float(frame_index),
+            navigation=navigation,
+        )
+        clock.value += 0.2
+        states.append(autonomy.tick())
+
+    assert [status["state"] for status in states] == [
+        "STG_STOP_CONFIRM",
+        "STG_ALIGN_CONFIRM",
+        "STG_ALIGN_CONFIRM",
+        "STG_ROTATE_RIGHT",
+    ]
+    assert all(status["linear"] == 0.0 for status in states)
+    assert states[-1]["angular"] > 0.0
+    assert all(command.linear == 0.0 for command in sdk.commands)
+
+
+def test_stop_turn_go_uses_only_viable_side_when_shortest_global_turn_is_blocked():
+    sdk = FakeSdk(active=True)
+    clock = Clock()
+    navigation = valid_sam()["navigation"] | {"heading_error_deg": 170.0}
+    left_only = _side_sector(
+        chosen="LEFT",
+        status="LEFT_CLEAR",
+        left_viable=True,
+        right_viable=False,
+        left_composite=0.9,
+        right_composite=0.05,
+        margin=0.85,
+    )
+    sam = LiveSam(
+        safe_sam_with_side_sector(
+            side_sector=left_only,
+            heading_deg=0.0,
+            navigation=navigation,
+        ),
+        clock,
+    )
+    autonomy = controller(sdk, sam, clock, settings=stop_turn_go_settings())
+
+    states = []
+    for frame_index in range(1, 5):
+        sam.base_payload = safe_sam_with_side_sector(
+            side_sector=left_only,
+            frame_index=frame_index,
+            heading_deg=0.0,
+            telemetry_timestamp=float(frame_index),
+            navigation=navigation,
+        )
+        clock.value += 0.2
+        states.append(autonomy.tick())
+
+    assert states[-1]["state"] == "STG_ROTATE_LEFT"
+    assert states[-1]["angular"] < 0.0
+    assert all(status["linear"] == 0.0 for status in states)
+    assert all(command.linear == 0.0 for command in sdk.commands)
+
+
+def test_stop_turn_go_rejects_global_turn_without_one_viable_side():
+    sdk = FakeSdk(active=True)
+    clock = Clock()
+    navigation = valid_sam()["navigation"] | {"heading_error_deg": 170.0}
+    ambiguous = _side_sector(
+        chosen=None,
+        status="AMBIGUOUS",
+        left_viable=False,
+        right_viable=False,
+    )
+    sam = LiveSam(
+        safe_sam_with_side_sector(
+            side_sector=ambiguous,
+            heading_deg=0.0,
+            navigation=navigation,
+        ),
+        clock,
+    )
+    autonomy = controller(sdk, sam, clock, settings=stop_turn_go_settings())
+
+    status = autonomy.tick()
+
+    assert status["state"] == "SAFETY_STOP"
+    assert status["linear"] == status["angular"] == 0.0
+    assert "side-sector evidence is AMBIGUOUS" in status["reason"]
+    assert sdk.commands[-1].linear == sdk.commands[-1].angular == 0.0
 
 
 def test_stop_turn_go_rotation_settle_requires_time_and_fresh_frame():
@@ -1910,7 +2100,7 @@ def test_second_pulse_starts_only_on_new_blocked_frame():
     assert second_pulse["recovery"]["pulse_count"] == 2
 
 
-def test_post_rotate_replan_frame_index_none_never_advances_count():
+def test_missing_frame_index_fails_closed_during_post_rotate_replan():
     sdk = FakeSdk(active=True)
     clock = Clock()
     settings = rotate_escape_settings(rotate_escape_pulse_sec=0.2, rotate_escape_settle_sec=0.2)
@@ -1927,15 +2117,34 @@ def test_post_rotate_replan_frame_index_none_never_advances_count():
     clock.value += 0.2
     autonomy.tick()  # settle detects the safe path -> POST_ROTATE_REPLAN next tick
 
-    # ...but once there, frame_index=None must never be able to satisfy the
-    # post-rotate confirmation count, no matter how many ticks pass.
+    # ...but once there, frame_index=None is malformed live input and must
+    # fail closed before it can satisfy the post-rotate confirmation count.
     sam.base_payload = safe_sam_with_side_sector(frame_index=None, telemetry_timestamp=3.0)
+    clock.value += 0.2
+    status = autonomy.tick()
+
+    assert status["state"] == "SAFETY_STOP"
+    assert status["reason"] == "SAM-TP frame index is invalid"
+    assert status["linear"] == status["angular"] == 0.0
+
+
+def test_missing_frame_index_never_confirms_target_sequence():
+    sdk = FakeSdk(active=True)
+    clock = Clock()
+    sam = FakeSam(valid_sam(frame_index=None))
+    autonomy = controller(
+        sdk,
+        sam,
+        clock,
+        settings=Mission1ControlConfig(target_sequence_confirm_frames=3),
+    )
+
     for _ in range(3):
-        clock.value += 0.2
         status = autonomy.tick()
-        assert status["state"] == "POST_ROTATE_REPLAN"
-        assert status["recovery"]["safe_frame_confirm_count"] == 0
-        assert status["linear"] == 0.0
+
+    assert status["state"] == "SAFETY_STOP"
+    assert status["reason"] == "SAM-TP frame index is invalid"
+    assert status["linear"] == status["angular"] == 0.0
 
 
 def test_frame_index_regression_during_settle_aborts():
@@ -1987,9 +2196,9 @@ def test_frame_index_regression_during_post_rotate_replan_aborts():
     assert "regressed" in status["reason"]
 
 
-def test_legacy_path_recovery_latch_frame_index_none_does_not_advance():
-    # The pre-existing (non-ROTATE_ESCAPE) path-recovery latch had the same
-    # fail-open "None counts as new" bug; verify it's fixed too.
+def test_legacy_path_recovery_latch_repeated_frame_does_not_advance():
+    # The pre-existing (non-ROTATE_ESCAPE) path-recovery latch must require
+    # distinct source observations rather than controller-loop ticks.
     sdk = FakeSdk(active=True)
     clock = Clock()
     good = valid_sam(local_path_selected_heading_deg=0.0, frame_index=10)
@@ -2012,15 +2221,15 @@ def test_legacy_path_recovery_latch_frame_index_none_does_not_advance():
     clock.value += 0.2
     assert autonomy.tick()["state"] == "SAFETY_STOP"
 
-    # frame_index missing on every subsequent tick -- must never satisfy the
+    # The same frame on every subsequent tick must never satisfy the
     # 3-distinct-frame confirmation just by ticking.
-    no_frame_index = valid_sam(local_path_selected_heading_deg=0.0)
+    repeated_frame = valid_sam(local_path_selected_heading_deg=0.0, frame_index=12)
     for _ in range(5):
-        sam.payload = no_frame_index
+        sam.payload = repeated_frame
         clock.value += 0.2
         status = autonomy.tick()
         assert status["state"] == "SAFETY_STOP"
-        assert "confirming safe path recovery (0/3)" in status["reason"]
+        assert "confirming safe path recovery (1/3)" in status["reason"]
 
 
 # --- D: safe-path check before side-sector-degradation check ---------------
@@ -2250,10 +2459,14 @@ def test_rotate_escape_aborts_first_pulse_when_actuator_does_not_respond():
         telemetry_timestamp=3.0,
     )
     clock.value += 0.3
+    settling = autonomy.tick()
+    clock.value += 0.4
     failed = autonomy.tick()
 
-    assert first_pulse["state"] == still_waiting["state"] == "ROTATE_PULSE_RIGHT"
-    assert still_waiting["recovery"]["pulse_motion_observed"] is False
+    assert first_pulse["state"] == "ROTATE_PULSE_RIGHT"
+    assert still_waiting["state"] == settling["state"] == "ROTATE_SETTLE"
+    assert still_waiting["angular"] == settling["angular"] == 0.0
+    assert settling["recovery"]["pulse_motion_observed"] is False
     assert failed["state"] == "SAFETY_STOP"
     assert failed["linear"] == failed["angular"] == 0.0
     assert "actuator did not respond" in failed["reason"]

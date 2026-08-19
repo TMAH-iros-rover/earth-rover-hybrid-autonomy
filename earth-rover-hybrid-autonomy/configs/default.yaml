@@ -110,6 +110,10 @@ localization:
   # Local ENU origin is locked to the average of this many consecutive
   # valid GPS fixes (a single fix is exactly as jitter-prone as any other).
   origin_lock_fix_count: 3
+  # Do not lock an origin from fixes belonging to different multipath
+  # clusters. The rover produced alternating clusters about 48 m apart while
+  # stationary; all fixes used for one origin must fit inside this radius.
+  origin_lock_max_spread_m: 5.0
 
   # Position process noise: a human estimate of how fast this rover can
   # plausibly move, NOT derived from control.linear_max/mission1_autonomy.
@@ -131,6 +135,13 @@ localization:
   gps_signal_min: 0.0
   gps_signal_max: 100.0
   gps_signal_higher_is_better: true
+
+  # Reject, rather than merely smooth, a GPS measurement this far from the
+  # held fused position. Navigation remains invalid until this many normal
+  # fixes return, so a position jump cannot swing checkpoint bearing while
+  # the rover is stationary.
+  position_outlier_reject_m: 8.0
+  position_recovery_streak: 3
 
   # Heading measurement noise (the SDK's `orientation` field).
   heading_measurement_std_deg: 8.0

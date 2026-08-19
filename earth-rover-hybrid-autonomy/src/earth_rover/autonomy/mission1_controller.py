@@ -66,6 +66,10 @@ class Mission1ControlConfig:
     stop_turn_stop_timeout_sec: float = 3.0
     stop_turn_rotate_angular: float = 0.12
     stop_turn_rotate_pulse_sec: float = 0.3
+    stop_turn_require_motion_response: bool = False
+    stop_turn_motion_response_timeout_sec: float = 1.5
+    stop_turn_motion_rpm_threshold: float = 1.0
+    stop_turn_motion_heading_delta_deg: float = 1.5
     stop_turn_settle_sec: float = 0.5
     stop_turn_drive_burst_sec: float = 0.6
     stop_turn_max_pulses: int = 8
@@ -142,6 +146,8 @@ class Mission1ControlConfig:
             "stop_turn_stop_timeout_sec": self.stop_turn_stop_timeout_sec,
             "stop_turn_rotate_angular": self.stop_turn_rotate_angular,
             "stop_turn_rotate_pulse_sec": self.stop_turn_rotate_pulse_sec,
+            "stop_turn_motion_response_timeout_sec": self.stop_turn_motion_response_timeout_sec,
+            "stop_turn_motion_heading_delta_deg": self.stop_turn_motion_heading_delta_deg,
             "stop_turn_settle_sec": self.stop_turn_settle_sec,
             "stop_turn_drive_burst_sec": self.stop_turn_drive_burst_sec,
             "stop_turn_max_total_sec": self.stop_turn_max_total_sec,
@@ -167,6 +173,8 @@ class Mission1ControlConfig:
             raise ValueError("enable_rotate_escape must be boolean")
         if not isinstance(self.enable_stop_turn_go, bool):
             raise ValueError("enable_stop_turn_go must be boolean")
+        if not isinstance(self.stop_turn_require_motion_response, bool):
+            raise ValueError("stop_turn_require_motion_response must be boolean")
         for name in (
             "stop_turn_confirm_frames",
             "stop_turn_stationary_confirm_samples",
@@ -274,6 +282,21 @@ class Mission1ControlConfig:
         if self.stop_turn_rotate_angular < self.minimum_rotate_angular:
             raise ValueError(
                 "stop_turn_rotate_angular must be at least minimum_rotate_angular"
+            )
+        if self.stop_turn_require_motion_response and (
+            self.stop_turn_motion_response_timeout_sec
+            < self.stop_turn_rotate_pulse_sec
+        ):
+            raise ValueError(
+                "stop_turn_motion_response_timeout_sec must be at least "
+                "stop_turn_rotate_pulse_sec"
+            )
+        if (
+            not math.isfinite(self.stop_turn_motion_rpm_threshold)
+            or self.stop_turn_motion_rpm_threshold < 0.0
+        ):
+            raise ValueError(
+                "stop_turn_motion_rpm_threshold must be finite and non-negative"
             )
         if not math.isfinite(self.stop_turn_cooldown_sec) or self.stop_turn_cooldown_sec < 0.0:
             raise ValueError("stop_turn_cooldown_sec must be finite and non-negative")
@@ -389,6 +412,11 @@ class Mission1Autonomy:
         self._stg_confirm_count = 0
         self._stg_last_frame_index: int | None = None
         self._stg_pulse_count = 0
+        self._stg_motion_observed = False
+        self._stg_max_abs_rpm = 0.0
+        self._stg_max_heading_delta_deg = 0.0
+        self._stg_motion_start_heading_deg: float | None = None
+        self._stg_motion_last_telemetry_key: tuple[Any, Any] | None = None
         self._stg_cooldown_until = -math.inf
         self._last_command = ControlCommand(0.0, 0.0, mode="STARTUP_STOP")
         self.status: dict[str, Any] = {
@@ -492,14 +520,20 @@ class Mission1Autonomy:
         sequence = _integer(navigation.get("target_sequence"))
         if sequence is not None and sequence != self._last_target_sequence:
             frame_index = _integer(sam.get("frame_index"))
-            is_new_observation = (
-                frame_index is None or frame_index != self._last_sequence_frame_index
-            )
             if sequence != self._pending_target_sequence:
                 self._pending_target_sequence = sequence
                 self._pending_target_sequence_count = 0
                 self._last_sequence_frame_index = None
-            if is_new_observation:
+            observation = _classify_observation(
+                frame_index, self._last_sequence_frame_index
+            )
+            if observation == "REGRESSED":
+                return self._stop(
+                    "SAFETY_STOP",
+                    "SAM frame regressed while confirming target checkpoint "
+                    f"sequence ({frame_index} < {self._last_sequence_frame_index})",
+                )
+            if observation == "NEW":
                 self._pending_target_sequence_count += 1
                 self._last_sequence_frame_index = frame_index
             if (
@@ -783,6 +817,76 @@ class Mission1Autonomy:
         heading_deg = float(sam["local_path_selected_heading_deg"])
         path_score = float(sam["path_mean_score"])
         if self.settings.enable_stop_turn_go:
+            global_rotate = self._rotate_to_goal_command(navigation)
+            if global_rotate is not None:
+                global_heading_error = _finite(navigation.get("heading_error_deg"))
+                if global_heading_error is None:
+                    self._reset_stop_turn_go()
+                    return self._stop(
+                        "SAFETY_STOP",
+                        "global checkpoint heading became invalid during stop-turn-go",
+                    )
+
+                required_side = "RIGHT" if global_rotate.angular > 0.0 else "LEFT"
+                planner = sam.get("planner")
+                side_sector = (
+                    planner.get("side_sector") if isinstance(planner, dict) else None
+                )
+                if isinstance(side_sector, dict):
+                    side_score = side_sector.get(required_side.lower())
+                    side_is_viable = (
+                        isinstance(side_score, dict)
+                        and side_score.get("viable") is True
+                    )
+                    if (
+                        side_sector.get("chosen") != required_side
+                        or not side_is_viable
+                    ):
+                        alternate_side = side_sector.get("chosen")
+                        alternate_score = (
+                            side_sector.get(str(alternate_side).lower())
+                            if alternate_side in ("LEFT", "RIGHT")
+                            else None
+                        )
+                        alternate_is_viable = (
+                            isinstance(alternate_score, dict)
+                            and alternate_score.get("viable") is True
+                        )
+                        if self._stg_phase is None and alternate_is_viable:
+                            # At maneuver entry the shorter global turn may
+                            # be obstructed while the opposite side is the
+                            # only observed escape.  Take the longer rotation
+                            # in that safe direction.  Once a maneuver has
+                            # begun, however, never reverse it from a noisy
+                            # side-sector change.
+                            alternate_direction = (
+                                1.0 if alternate_side == "RIGHT" else -1.0
+                            )
+                            self._rotate_direction = alternate_direction
+                            global_rotate = ControlCommand(
+                                0.0,
+                                alternate_direction * abs(global_rotate.angular),
+                                mode="ROTATE_TO_GOAL_SAFE_SIDE",
+                            )
+                            required_side = str(alternate_side)
+                        else:
+                            self._reset_stop_turn_go()
+                            return self._stop(
+                                "SAFETY_STOP",
+                                "global checkpoint requires "
+                                f"{required_side.lower()} rotation but side-sector evidence "
+                                f"is {side_sector.get('status') or 'unavailable'}",
+                            )
+
+                # Preserve the global-heading direction latched by
+                # _rotate_to_goal_command near the +/-180 degree wrap.  The
+                # local SAM path can point straight ahead even when that view
+                # leads away from the active checkpoint, so it must not be
+                # allowed to enter a straight burst until global alignment is
+                # inside the rotate-to-goal hysteresis band.
+                heading_deg = math.copysign(
+                    abs(global_heading_error), global_rotate.angular
+                )
             return self._stop_turn_go_tick(
                 sam,
                 now_mono,
@@ -900,6 +1004,9 @@ class Mission1Autonomy:
             return "SAM-TP is not ready"
         if sam.get("state") != "CLEAR":
             return f"SAM-TP state is {sam.get('state')}"
+        frame_index = _integer(sam.get("frame_index"))
+        if frame_index is None or frame_index < 0:
+            return "SAM-TP frame index is invalid"
         published = _finite(sam.get("published_timestamp"))
         if published is None:
             return "SAM-TP status has no valid timestamp"
@@ -1214,7 +1321,7 @@ class Mission1Autonomy:
             )
         if self._stg_phase == "ROTATE_PULSE":
             return self._stop_turn_rotate_tick(
-                now_mono, sequence, heading_deg, path_score, frame_index
+                sam, now_mono, sequence, heading_deg, path_score, frame_index
             )
         if self._stg_phase == "ROTATE_SETTLE":
             return self._stop_turn_settle_tick(
@@ -1368,6 +1475,7 @@ class Mission1Autonomy:
 
     def _stop_turn_rotate_tick(
         self,
+        sam: dict[str, Any],
         now_mono: float,
         sequence: int | None,
         heading_deg: float,
@@ -1386,6 +1494,12 @@ class Mission1Autonomy:
                     "stop-turn-go exceeded maximum rotate pulses",
                 )
             self._stg_phase_started_monotonic = now_mono
+            self._stg_motion_observed = False
+            self._stg_max_abs_rpm = 0.0
+            self._stg_max_heading_delta_deg = 0.0
+            self._stg_motion_start_heading_deg = self._recovery_heading_deg(sam)
+            self._stg_motion_last_telemetry_key = None
+        self._observe_stop_turn_motion(sam)
         elapsed = now_mono - self._stg_phase_started_monotonic
         if elapsed + 1e-9 >= self.settings.stop_turn_rotate_pulse_sec:
             self._stg_phase = "ROTATE_SETTLE"
@@ -1407,7 +1521,8 @@ class Mission1Autonomy:
         return self._dispatch_stop_turn_go(
             f"STG_ROTATE_{direction_label}",
             f"alignment pulse {self._stg_pulse_count}/"
-            f"{self.settings.stop_turn_max_pulses}",
+            f"{self.settings.stop_turn_max_pulses} "
+            f"(motion={'yes' if self._stg_motion_observed else 'no'})",
             ControlCommand(
                 0.0,
                 self._stg_direction * self.settings.stop_turn_rotate_angular,
@@ -1418,6 +1533,48 @@ class Mission1Autonomy:
             heading_deg,
             path_score,
         )
+
+    def _observe_stop_turn_motion(self, sam: dict[str, Any]) -> None:
+        telemetry = sam.get("telemetry")
+        if isinstance(telemetry, dict) and sam.get("telemetry_valid") is True:
+            sample_key = (
+                telemetry.get("local_timestamp"),
+                telemetry.get("sdk_timestamp"),
+            )
+            if sample_key != self._stg_motion_last_telemetry_key:
+                self._stg_motion_last_telemetry_key = sample_key
+                rpms = telemetry.get("rpms")
+                if isinstance(rpms, list) and rpms:
+                    finite_rpms = [_finite(value) for value in rpms]
+                    if all(value is not None for value in finite_rpms):
+                        max_abs_rpm = max(abs(value) for value in finite_rpms)
+                        self._stg_max_abs_rpm = max(
+                            self._stg_max_abs_rpm, max_abs_rpm
+                        )
+                        if (
+                            max_abs_rpm
+                            >= self.settings.stop_turn_motion_rpm_threshold
+                        ):
+                            self._stg_motion_observed = True
+
+        heading = self._recovery_heading_deg(sam)
+        if heading is None:
+            return
+        if self._stg_motion_start_heading_deg is None:
+            self._stg_motion_start_heading_deg = heading
+            return
+        heading_delta = abs(
+            (heading - self._stg_motion_start_heading_deg + 180.0) % 360.0
+            - 180.0
+        )
+        self._stg_max_heading_delta_deg = max(
+            self._stg_max_heading_delta_deg, heading_delta
+        )
+        if (
+            self._stg_max_heading_delta_deg
+            >= self.settings.stop_turn_motion_heading_delta_deg
+        ):
+            self._stg_motion_observed = True
 
     def _stop_turn_settle_tick(
         self,
@@ -1430,6 +1587,7 @@ class Mission1Autonomy:
     ) -> dict[str, Any]:
         assert self._stg_phase_started_monotonic is not None
         elapsed = now_mono - self._stg_phase_started_monotonic
+        self._observe_stop_turn_motion(sam)
         stationary_status, stationary_detail = self._stop_turn_stationary_status(sam)
         if stationary_status == "STATIONARY_NEW":
             self._stg_stationary_count += 1
@@ -1449,6 +1607,21 @@ class Mission1Autonomy:
             path_score,
         )
         if elapsed < self.settings.stop_turn_settle_sec:
+            return result
+        if (
+            self.settings.stop_turn_require_motion_response
+            and not self._stg_motion_observed
+        ):
+            if elapsed >= self.settings.stop_turn_motion_response_timeout_sec:
+                return self._abort_stop_turn_go(
+                    now_mono,
+                    sequence,
+                    heading_deg,
+                    path_score,
+                    "stop-turn-go rotate actuator did not respond "
+                    f"(max_rpm={self._stg_max_abs_rpm:.2f}, "
+                    f"heading_delta={self._stg_max_heading_delta_deg:.2f}deg)",
+                )
             return result
         assert self._stg_stop_started_monotonic is not None
         if (
@@ -1659,6 +1832,10 @@ class Mission1Autonomy:
             "confirm_required": self.settings.stop_turn_confirm_frames,
             "stationary_count": self._stg_stationary_count,
             "stationary_required": self.settings.stop_turn_stationary_confirm_samples,
+            "motion_response_required": self.settings.stop_turn_require_motion_response,
+            "motion_observed": self._stg_motion_observed,
+            "max_abs_rpm": self._stg_max_abs_rpm,
+            "max_heading_delta_deg": self._stg_max_heading_delta_deg,
             "elapsed_sec": elapsed,
         }
 
@@ -1736,6 +1913,11 @@ class Mission1Autonomy:
         self._stg_confirm_count = 0
         self._stg_last_frame_index = None
         self._stg_pulse_count = 0
+        self._stg_motion_observed = False
+        self._stg_max_abs_rpm = 0.0
+        self._stg_max_heading_delta_deg = 0.0
+        self._stg_motion_start_heading_deg = None
+        self._stg_motion_last_telemetry_key = None
         if clear_cooldown:
             self._stg_cooldown_until = -math.inf
 
@@ -2247,23 +2429,13 @@ class Mission1Autonomy:
             self._recovery_pulse_last_telemetry_key = None
         self._observe_recovery_pulse_motion(sam)
         elapsed = now_mono - self._recovery_phase_started_monotonic
-        if (
-            elapsed + 1e-9 >= self.settings.rotate_escape_pulse_sec
-            and self._recovery_pulse_motion_observed
-        ):
+        if elapsed + 1e-9 >= self.settings.rotate_escape_pulse_sec:
             self._recovery_phase = "ROTATE_SETTLE"
             self._recovery_phase_started_monotonic = now_mono
+            self._recovery_stationary_confirm_count = 0
+            self._recovery_last_stationary_sample_key = None
             return self._recovery_settle_tick(
                 sam, now_mono, sequence, side_sector, frame_index
-            )
-        if elapsed + 1e-9 >= self.settings.rotate_escape_motion_response_timeout_sec:
-            return self._abort_recovery(
-                now_mono,
-                sequence,
-                side_sector,
-                "rotate escape actuator did not respond "
-                f"(max_rpm={self._recovery_pulse_max_abs_rpm:.2f}, "
-                f"heading_delta={self._recovery_pulse_max_heading_delta_deg:.2f}deg)",
             )
         angular_limit = min(self.settings.rotate_escape_angular, self.settings.max_angular)
         raw = ControlCommand(0.0, self._recovery_direction * angular_limit, mode="ROTATE_PULSE")
@@ -2302,11 +2474,21 @@ class Mission1Autonomy:
             )
         assert self._recovery_phase_started_monotonic is not None
         elapsed = now_mono - self._recovery_phase_started_monotonic
+        self._observe_recovery_pulse_motion(sam)
+        stationary_status, stationary_detail = self._telemetry_stationary_status(sam)
+        if stationary_status == "STATIONARY_NEW":
+            self._recovery_stationary_confirm_count += 1
+        elif stationary_status in ("MOVING", "INVALID"):
+            self._recovery_stationary_confirm_count = 0
         command = ControlCommand(0.0, 0.0, mode="ROTATE_SETTLE")
         result = self._dispatch_recovery_command(
             "ROTATE_SETTLE",
             f"settling after pulse {self._recovery_pulse_count}/{self.settings.rotate_escape_max_pulses} "
-            f"({elapsed:.2f}/{self.settings.rotate_escape_settle_sec:.2f}s)",
+            f"({elapsed:.2f}/{self.settings.rotate_escape_settle_sec:.2f}s; "
+            f"motion={'yes' if self._recovery_pulse_motion_observed else 'no'}; "
+            f"stationary {self._recovery_stationary_confirm_count}/"
+            f"{self.settings.rotate_escape_stationary_confirm_samples}; "
+            f"{stationary_detail})",
             command,
             now_mono,
             sequence,
@@ -2316,6 +2498,22 @@ class Mission1Autonomy:
         if result["state"] == "ERROR_STOP":
             return result
         if elapsed < self.settings.rotate_escape_settle_sec:
+            return result
+        if not self._recovery_pulse_motion_observed:
+            if elapsed >= self.settings.rotate_escape_motion_response_timeout_sec:
+                return self._abort_recovery(
+                    now_mono,
+                    sequence,
+                    side_sector,
+                    "rotate escape actuator did not respond "
+                    f"(max_rpm={self._recovery_pulse_max_abs_rpm:.2f}, "
+                    f"heading_delta={self._recovery_pulse_max_heading_delta_deg:.2f}deg)",
+                )
+            return result
+        if (
+            self._recovery_stationary_confirm_count
+            < self.settings.rotate_escape_stationary_confirm_samples
+        ):
             return result
         # Settle duration alone is not enough -- a genuinely new, distinct
         # SAM frame must also have arrived before re-planning off it.

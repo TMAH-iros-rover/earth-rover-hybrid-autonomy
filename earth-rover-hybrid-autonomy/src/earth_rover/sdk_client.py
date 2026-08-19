@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from dataclasses import replace
 from typing import Any
 
 import requests
@@ -57,11 +58,30 @@ class EarthRoverSDKClient:
                 local_timestamp = time.time()
                 payload = self._request_json("GET", path)
                 encoded = self._extract_image_payload(payload)
+                source_frame_id_value = payload.get("source_frame_id")
+                source_frame_id = (
+                    source_frame_id_value
+                    if isinstance(source_frame_id_value, str) and source_frame_id_value
+                    else None
+                )
+                cached = self._last_frames.get(source)
+                source_frame_new = not (
+                    source_frame_id is not None
+                    and cached is not None
+                    and cached.source_frame_id == source_frame_id
+                )
+                if not source_frame_new:
+                    local_timestamp = cached.timestamp
                 frame = FrameData(
                     timestamp=local_timestamp,
                     image=decode_base64_image(encoded),
                     source=source,
                     sdk_timestamp=safe_float(payload.get("timestamp")),
+                    source_frame_id=source_frame_id,
+                    source_media_time_sec=safe_float(
+                        payload.get("source_media_time_sec")
+                    ),
+                    source_frame_new=source_frame_new,
                 )
                 self._last_frames[source] = frame
                 return frame
@@ -70,7 +90,7 @@ class EarthRoverSDKClient:
                 errors.append(f"{path}: {exc}")
         cached = self._last_frames.get(source)
         if cached is not None:
-            return cached
+            return replace(cached, source_frame_new=False)
         raise SDKClientError(
             f"Could not fetch {source} frame after trying {', '.join(errors)}"
         ) from last_error

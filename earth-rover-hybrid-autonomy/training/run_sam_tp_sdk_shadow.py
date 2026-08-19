@@ -302,9 +302,11 @@ def main(argv: list[str] | None = None) -> int:
         "max_heading_rate_deg_per_sec",
         navigation_cfg.get("max_heading_rate_deg_per_sec", 120.0),
     )
-    # Constructed once, outside the route-refresh block below -- the fused
-    # position/heading estimate must not reset just because the checkpoint
-    # route reloaded.
+    # Constructed once, outside the route-refresh block below. Route content
+    # refreshes preserve the estimate, but a new mission session resets it:
+    # direct-bot telemetry can be stale or refer to the rover's pre-positioned
+    # location, so carrying that origin into an active mission can make every
+    # fresh GPS fix look like a permanent outlier.
     localizer = (
         GpsHeadingEkf(localization_cfg) if localization_cfg.get("enabled", True) else None
     )
@@ -320,6 +322,7 @@ def main(argv: list[str] | None = None) -> int:
     next_route_refresh = 0.0
     route_planner = None
     route_signature = None
+    mission_active: bool | None = None
     delay = 1.0 / args.target_fps
     started = time.monotonic()
     consecutive_failures = 0
@@ -370,6 +373,19 @@ def main(argv: list[str] | None = None) -> int:
                                 },
                                 sort_keys=True,
                             )
+                            route_mission_active = bool(route["mission_active"])
+                            if (
+                                mission_active is False
+                                and route_mission_active
+                                and localizer is not None
+                            ):
+                                localizer.reset()
+                                print(
+                                    "Mission activated: localization reset; "
+                                    "reacquiring GPS/heading origin",
+                                    flush=True,
+                                )
+                            mission_active = route_mission_active
                             if route["route_loaded"] and signature != route_signature:
                                 route_planner = CheckpointRoutePlanner(
                                     route["checkpoints"],

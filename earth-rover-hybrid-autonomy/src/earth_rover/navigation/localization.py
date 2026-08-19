@@ -36,6 +36,7 @@ class GpsHeadingEkfConfig:
 
     # Local ENU origin lock.
     origin_lock_fix_count: int = 3
+    origin_lock_max_spread_m: float = 5.0
 
     # Position process noise: how far the rover could plausibly have moved
     # since the last fusion, absent any other information.
@@ -50,6 +51,14 @@ class GpsHeadingEkfConfig:
     gps_signal_min: float = 0.0
     gps_signal_max: float = 100.0
     gps_signal_higher_is_better: bool = True
+
+    # Absolute position-innovation gate. The live rover reported alternating
+    # GPS clusters roughly 48 m apart while all wheel RPMs were zero. A
+    # Kalman gain only smooths that fault; it does not reject it, so the
+    # checkpoint bearing still moved by tens of degrees. Hold the last fused
+    # position and fail closed until normal fixes return.
+    position_outlier_reject_m: float = 8.0
+    position_recovery_streak: int = 3
 
     # Heading measurement (the SDK's pre-fused `orientation` scalar).
     heading_measurement_std_deg: float = 8.0
@@ -117,6 +126,7 @@ class GpsHeadingEkfConfig:
         positive = {
             "max_linear_speed_mps": self.max_linear_speed_mps,
             "process_noise_position_scale": self.process_noise_position_scale,
+            "origin_lock_max_spread_m": self.origin_lock_max_spread_m,
             "default_gps_accuracy_m": self.default_gps_accuracy_m,
             "gps_signal_accuracy_floor_m": self.gps_signal_accuracy_floor_m,
             "gps_signal_accuracy_ceiling_m": self.gps_signal_accuracy_ceiling_m,
@@ -126,6 +136,7 @@ class GpsHeadingEkfConfig:
             "gyro_scale_rad_per_sec_per_unit": self.gyro_scale_rad_per_sec_per_unit,
             "heading_outlier_reject_deg": self.heading_outlier_reject_deg,
             "heading_recovery_max_delta_deg": self.heading_recovery_max_delta_deg,
+            "position_outlier_reject_m": self.position_outlier_reject_m,
         }
         if any(not math.isfinite(value) or value <= 0.0 for value in positive.values()):
             raise ValueError(
@@ -157,6 +168,12 @@ class GpsHeadingEkfConfig:
             or self.heading_recovery_streak < 1
         ):
             raise ValueError("heading_recovery_streak must be a positive integer")
+        if (
+            isinstance(self.position_recovery_streak, bool)
+            or not isinstance(self.position_recovery_streak, int)
+            or self.position_recovery_streak < 1
+        ):
+            raise ValueError("position_recovery_streak must be a positive integer")
 
 
 class GpsHeadingEkf:
@@ -203,11 +220,22 @@ class GpsHeadingEkf:
         self.config.validate()
         self._monotonic = monotonic
 
+        self.reset()
+
+    def reset(self) -> None:
+        """Discard the current session estimate and reacquire a fresh origin."""
+
         self._origin: tuple[float, float] | None = None
         self._origin_fixes: list[tuple[float, float]] = []
         self._state: np.ndarray | None = None
         self._P: np.ndarray | None = None
         self._last_fusion_monotonic: float | None = None
+
+        self._position_outlier_streak = 0
+        self._position_recovery_count = 0
+        self._position_valid = False
+        self._position_status_reason = "UNINITIALIZED"
+        self._last_position_innovation_m: float | None = None
 
         self._latest_yaw_rate_rad_s = 0.0
         self._gyro_trusted = True
@@ -236,8 +264,18 @@ class GpsHeadingEkf:
     def heading_valid(self) -> bool:
         return self._heading_valid
 
+    @property
+    def position_valid(self) -> bool:
+        return self._position_valid
+
     def status(self) -> dict[str, object]:
         return {
+            "position_valid": self._position_valid,
+            "position_status_reason": self._position_status_reason,
+            "position_outlier_streak": self._position_outlier_streak,
+            "position_recovery_count": self._position_recovery_count,
+            "position_recovery_required": self.config.position_recovery_streak,
+            "last_position_innovation_m": self._last_position_innovation_m,
             "heading_valid": self._heading_valid,
             "heading_status_reason": self._heading_status_reason,
             "heading_outlier_streak": self._heading_outlier_streak,
@@ -321,12 +359,23 @@ class GpsHeadingEkf:
         lat = safe_float(latitude)
         lon = safe_float(longitude)
         if lat is None or lon is None or not (-90.0 <= lat <= 90.0) or not (-180.0 <= lon <= 180.0):
+            self._position_valid = False
+            self._position_status_reason = "INVALID_GPS"
+            self._position_recovery_count = 0
             return
         heading_deg_value = safe_float(heading_deg)
         now = self._monotonic()
 
         if self._origin is None:
-            self._origin_fixes.append((lat, lon))
+            if self._origin_fixes and any(
+                math.hypot(*latlon_to_local_xy(lat, lon, fix_lat, fix_lon))
+                > self.config.origin_lock_max_spread_m
+                for fix_lat, fix_lon in self._origin_fixes
+            ):
+                self._origin_fixes = [(lat, lon)]
+                self._position_status_reason = "ORIGIN_FIX_SPREAD_RESET"
+            else:
+                self._origin_fixes.append((lat, lon))
             self._last_fusion_monotonic = now
             if len(self._origin_fixes) < self.config.origin_lock_fix_count:
                 return
@@ -353,6 +402,9 @@ class GpsHeadingEkf:
                 self.config.heading_recovery_streak if self._heading_valid else 0
             )
             self._last_recovery_heading_rad = None
+            self._position_valid = True
+            self._position_status_reason = "OK"
+            self._position_recovery_count = self.config.position_recovery_streak
             return
 
         dt = 0.0
@@ -437,12 +489,47 @@ class GpsHeadingEkf:
         self._P = (identity - K @ H) @ self._P
 
     def _update_gps(self, x_meas: float, y_meas: float, accuracy_m: float) -> None:
+        assert self._state is not None
         H = np.array([[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]])
         R = np.diag([accuracy_m**2, accuracy_m**2])
         innovation = np.array(
             [x_meas - float(self._state[0]), y_meas - float(self._state[1])]
         )
+        innovation_m = float(np.linalg.norm(innovation))
+        self._last_position_innovation_m = innovation_m
+        if innovation_m > self.config.position_outlier_reject_m:
+            self._position_outlier_streak += 1
+            self._position_recovery_count = 0
+            self._position_valid = False
+            self._position_status_reason = "POSITION_OUTLIER_REJECTED"
+            log = (
+                logger.warning
+                if self._position_outlier_streak == 1
+                or self._position_outlier_streak % 20 == 0
+                else logger.debug
+            )
+            log(
+                "GpsHeadingEkf: rejecting GPS position innovation %.1f m "
+                "(threshold %.1f m, streak=%d); navigation position is "
+                "invalid until normal fixes recover",
+                innovation_m,
+                self.config.position_outlier_reject_m,
+                self._position_outlier_streak,
+            )
+            return
+
         self._kalman_update(H, R, innovation)
+        self._position_outlier_streak = 0
+        if self._position_valid:
+            self._position_recovery_count = self.config.position_recovery_streak
+            self._position_status_reason = "OK"
+            return
+        self._position_recovery_count += 1
+        if self._position_recovery_count >= self.config.position_recovery_streak:
+            self._position_valid = True
+            self._position_status_reason = "OK"
+        else:
+            self._position_status_reason = "POSITION_RECOVERING"
 
     def _update_heading(self, heading_meas_rad: float) -> None:
         assert self._state is not None

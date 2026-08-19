@@ -175,14 +175,26 @@ def test_dashboard_javascript_has_no_control_endpoint() -> None:
     assert 'active ? "End Mission" : "Reset Mission"' in source
     assert "(!missionRequested || (!active && !configured))" in source
     assert "stale cloud ride" in source
+    assert 'runMissionAction("End Mission", "/end-mission", {' in source
+    assert "mission_slug: missionSlug" in source
 
     html = (ROOT / "static/mission_dashboard.html").read_text(encoding="utf-8")
     assert 'id="view-raw"' in html
     assert 'id="view-sam-tp"' in html
     assert 'id="sam-tp-metrics"' in html
+    assert '<option value="mission-2"></option>' in html
+    assert '<option value="mission2"></option>' in html
     assert "GPS shortest path" in html
     assert "SAM-TP heading-aware local path" in html
     assert "GPS trail (≥2 m)" in html
+
+    rtc_source = (ROOT / "static/basicVideoCall.js").read_text(encoding="utf-8")
+    assert "source_frame_id" in rtc_source
+    assert "source_total_video_frames" in rtc_source
+    assert "window.getLastFrameMetadata" in rtc_source
+    assert 'status.state === "STG_DRIVE_STRAIGHT"' in source
+    assert "position_status_reason" in source
+    assert "heading_status_reason" in source
 
 
 def test_dashboard_renders_rotate_escape_side_sector_and_recovery_state() -> None:
@@ -444,6 +456,87 @@ class _JsonRequest:
 
     async def json(self):
         return self.payload
+
+
+def test_get_mission_two_selects_and_loads_its_route(monkeypatch) -> None:
+    calls = []
+
+    async def fake_checkpoints():
+        calls.append(main.current_mission_slug())
+        main.checkpoints_list_data = {
+            "checkpoints_list": [{"sequence": 1}, {"sequence": 2}]
+        }
+
+    monkeypatch.setattr(main, "selected_mission_slug", "mission-1")
+    monkeypatch.setattr(main, "active_session_mode", None)
+    monkeypatch.setattr(main, "active_mission_slug", None)
+    monkeypatch.setattr(main, "checkpoints_list_data", {})
+    monkeypatch.setattr(main, "get_checkpoints_list", fake_checkpoints)
+
+    response = asyncio.run(
+        main.select_mission(_JsonRequest({"mission_slug": "mission-2"}))
+    )
+    payload = json.loads(response.body)
+
+    assert response.status_code == 200
+    assert main.selected_mission_slug == "mission-2"
+    assert calls == ["mission-2"]
+    assert len(payload["checkpoints"]["checkpoints_list"]) == 2
+
+
+def test_active_mission_one_cannot_be_replaced_by_get_mission_two(monkeypatch) -> None:
+    monkeypatch.setattr(main, "selected_mission_slug", "mission-1")
+    monkeypatch.setattr(main, "active_session_mode", "mission")
+    monkeypatch.setattr(main, "active_mission_slug", "mission-1")
+
+    with pytest.raises(main.HTTPException) as caught:
+        asyncio.run(
+            main.select_mission(_JsonRequest({"mission_slug": "mission-2"}))
+        )
+
+    assert caught.value.status_code == 409
+    assert main.selected_mission_slug == "mission-1"
+
+
+def test_end_mission_two_sends_explicit_mission_slug(monkeypatch) -> None:
+    calls = []
+
+    async def fake_end_ride(_headers, bot_slug, mission_slug):
+        calls.append((bot_slug, mission_slug))
+        return {"ok": True}
+
+    async def fake_reset(*, send_stop):
+        calls.append(("reset", send_stop))
+
+    monkeypatch.setenv("SDK_API_TOKEN", "token")
+    monkeypatch.setenv("BOT_SLUG", "bot")
+    monkeypatch.setattr(main, "selected_mission_slug", "mission-2")
+    monkeypatch.setattr(main, "active_session_mode", "mission")
+    monkeypatch.setattr(main, "active_mission_slug", "mission-2")
+    monkeypatch.setattr(main, "end_ride", fake_end_ride)
+    monkeypatch.setattr(main, "reset_local_bridge", fake_reset)
+
+    response = asyncio.run(
+        main.end_mission(_JsonRequest({"mission_slug": "mission-2"}))
+    )
+
+    assert response.status_code == 200
+    assert calls == [("bot", "mission-2"), ("reset", False)]
+
+
+def test_end_mission_rejects_slug_different_from_active_mission(monkeypatch) -> None:
+    monkeypatch.setenv("SDK_API_TOKEN", "token")
+    monkeypatch.setenv("BOT_SLUG", "bot")
+    monkeypatch.setattr(main, "selected_mission_slug", "mission-1")
+    monkeypatch.setattr(main, "active_session_mode", "mission")
+    monkeypatch.setattr(main, "active_mission_slug", "mission-1")
+
+    with pytest.raises(main.HTTPException) as caught:
+        asyncio.run(
+            main.end_mission(_JsonRequest({"mission_slug": "mission-2"}))
+        )
+
+    assert caught.value.status_code == 409
 
 
 def test_start_mission_failure_preserves_existing_direct_bridge(monkeypatch) -> None:

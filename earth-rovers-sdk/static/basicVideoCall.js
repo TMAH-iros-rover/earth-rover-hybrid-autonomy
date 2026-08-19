@@ -485,7 +485,14 @@ async function captureFrameAsBase64(uid, videoTrack) {
 // Add at the beginning of the file
 const DEBUG_MODE = false;
 const lastBase64Frames = {};
+const lastFrameMetadata = {};
+const frameSourceSessionId = (
+  window.crypto && typeof window.crypto.randomUUID === "function"
+    ? window.crypto.randomUUID()
+    : `${Date.now()}-${Math.random().toString(16).slice(2)}`
+);
 window.lastBase64Frames = lastBase64Frames;
+window.lastFrameMetadata = lastFrameMetadata;
 
 // Function to get the latest base64 frame for a specific UID
 async function getLastBase64Frame(uid) {
@@ -499,7 +506,32 @@ async function getLastBase64Frame(uid) {
     return null;
   }
   lastBase64Frames[uid] = base64Frame;
+  const video = document.querySelector(`#player-${uid} video`);
+  const quality = video && typeof video.getVideoPlaybackQuality === "function"
+    ? video.getVideoPlaybackQuality()
+    : null;
+  const mediaTime = video && Number.isFinite(video.currentTime)
+    ? video.currentTime
+    : null;
+  const totalFrames = quality && Number.isFinite(quality.totalVideoFrames)
+    ? quality.totalVideoFrames
+    : null;
+  lastFrameMetadata[uid] = {
+    source_frame_id: [
+      frameSourceSessionId,
+      uid,
+      totalFrames === null ? "na" : totalFrames,
+      mediaTime === null ? "na" : mediaTime.toFixed(6),
+    ].join(":"),
+    source_media_time_sec: mediaTime,
+    source_total_video_frames: totalFrames,
+    browser_capture_timestamp: Date.now() / 1000,
+  };
   return base64Frame;
+}
+
+function getLastFrameMetadata(uid) {
+  return lastFrameMetadata[uid] || null;
 }
 
 function initializeImageParams({ imageFormat, imageQuality }) {
@@ -507,6 +539,7 @@ function initializeImageParams({ imageFormat, imageQuality }) {
 }
 window.initializeImageParams = initializeImageParams;
 window.getLastBase64Frame = getLastBase64Frame;
+window.getLastFrameMetadata = getLastFrameMetadata;
 
 /*
  * Toggle mute/unmute for remote audio tracks (rover stream).

@@ -725,6 +725,11 @@ async function pollSamTpStatus() {
       const residual = Number(status.local_path_heading_residual_deg);
       const targetBearing = Number(status.navigation?.target_bearing_deg);
       const roverHeading = Number(status.navigation?.current_heading_deg);
+      const positionReason = status.localization?.position_status_reason;
+      const headingReason = status.localization?.heading_status_reason;
+      const localizationMetrics = positionReason || headingReason
+        ? ` | GPS ${positionReason || "unknown"} / heading ${headingReason || "unknown"}`
+        : "";
       const guidanceMetrics = status.global_target_heading_error_deg !== null
         && status.global_target_heading_error_deg !== undefined
         && Number.isFinite(globalHeading)
@@ -754,6 +759,7 @@ async function pollSamTpStatus() {
         + (Number.isFinite(targetBearing) && Number.isFinite(roverHeading)
           ? ` | bearing ${targetBearing.toFixed(1)}° / rover ${roverHeading.toFixed(1)}°`
           : "")
+        + localizationMetrics
         + (status.sdk_clock_offset_hours === null
           || status.sdk_clock_offset_hours === undefined
           ? ""
@@ -803,10 +809,15 @@ async function pollAutonomyStatus() {
     }
     const status = await response.json();
     state.autonomyNextPollMs = 0;
-    const driving = status.state === "DRIVING";
+    const linear = Number(status.linear);
+    const angular = Number(status.angular);
+    const driving = status.state === "DRIVING"
+      || status.state === "STG_DRIVE_STRAIGHT"
+      || (Number.isFinite(linear) && Math.abs(linear) > 0.0001)
+      || (Number.isFinite(angular) && Math.abs(angular) > 0.0001);
     const complete = status.state === "MISSION_COMPLETE";
     elements.autonomyState.textContent = driving
-      ? `AUTO ${Number(status.linear).toFixed(2)} / ${Number(status.angular).toFixed(2)}`
+      ? `AUTO ${linear.toFixed(2)} / ${angular.toFixed(2)}`
       : complete ? "Mission complete" : status.state.replaceAll("_", " ");
     elements.autonomyState.title = status.reason || "";
     elements.autonomyState.className =
@@ -906,12 +917,19 @@ elements.connect.addEventListener("click", () => {
 });
 elements.refresh.addEventListener("click", getSelectedMission);
 elements.end.addEventListener("click", () => {
+  const missionSlug = elements.missionSlug.value.trim();
+  if (!missionSlug) {
+    appendLog("End Mission failed", "Select a mission slug first", true);
+    return;
+  }
   const prompt = state.missionActive
-    ? "Stop autonomy now and end the active mission?"
-    : "Reset the selected mission's stale cloud ride? This clears its current progress.";
+    ? `Stop autonomy now and end ${missionSlug}?`
+    : `Reset ${missionSlug}'s stale cloud ride? This clears its current progress.`;
   if (window.confirm(prompt)) {
     tryAutonomyStopBeforeEndMission()
-      .finally(() => runMissionAction("End Mission", "/end-mission"));
+      .finally(() => runMissionAction("End Mission", "/end-mission", {
+        mission_slug: missionSlug,
+      }));
   }
 });
 elements.stopAutonomy.addEventListener("click", () => {

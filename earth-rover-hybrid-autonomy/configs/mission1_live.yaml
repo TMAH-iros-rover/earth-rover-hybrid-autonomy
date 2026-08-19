@@ -18,12 +18,12 @@ mission1_autonomy:
   minimum_linear: 0.12
   max_linear: 0.12
   heading_kp: 0.30
-  max_angular: 0.22
+  max_angular: 0.40
   stop_forward_heading_deg: 50.0
   rotate_to_goal_heading_deg: 50.0
   rotate_exit_threshold_deg: 20.0
-  rotate_to_goal_angular: 0.15
-  minimum_rotate_angular: 0.12
+  rotate_to_goal_angular: 0.40
+  minimum_rotate_angular: 0.40
   # The camera/planner/control loop is too delayed for stable simultaneous
   # steering. Stop, pulse-rotate on confirmed fresh frames, then issue a
   # short straight-only burst before stopping to observe and replan again.
@@ -31,32 +31,46 @@ mission1_autonomy:
   stop_turn_heading_threshold_deg: 7.5
   stop_turn_confirm_frames: 2
   stop_turn_stationary_confirm_samples: 2
-  stop_turn_stop_timeout_sec: 3.0
-  stop_turn_rotate_angular: 0.12
-  stop_turn_rotate_pulse_sec: 0.30
-  stop_turn_settle_sec: 0.50
+  # The physical rover took about 2.5 s to report zero RPM after a 0.12 m/s
+  # drive burst.  Keep commanding zero while allowing enough telemetry time
+  # for two distinct stationary samples.
+  stop_turn_stop_timeout_sec: 5.0
+  # Live actuator sweep on 2026-08-19: 0.22 and 0.30 produced zero wheel
+  # RPM, while 0.40 produced immediate RPM and heading response. Require the
+  # measured effective command and independent RPM/heading evidence.
+  stop_turn_rotate_angular: 0.40
+  # A 0.60 s pulse repeatedly left RPM at zero; the earlier attended 1.00 s
+  # direct test was the shortest duration that reliably crossed static
+  # friction at angular=0.40.  The controller now hard-stops at this deadline
+  # regardless of delayed telemetry response.
+  stop_turn_rotate_pulse_sec: 1.00
+  stop_turn_require_motion_response: true
+  stop_turn_motion_response_timeout_sec: 1.50
+  stop_turn_motion_rpm_threshold: 1.0
+  stop_turn_motion_heading_delta_deg: 1.5
+  stop_turn_settle_sec: 1.20
   stop_turn_drive_burst_sec: 0.60
   stop_turn_max_pulses: 8
-  stop_turn_max_total_sec: 12.0
+  stop_turn_max_total_sec: 18.0
   stop_turn_cooldown_sec: 3.0
   # If a near obstacle rejects every forward metric trajectory, use the
   # independent image side sectors below to choose a bounded rotate escape.
   # Ambiguous/BOTH_UNSAFE evidence still fails closed without rotating.
   enable_rotate_escape: true
-  rotate_escape_angular: 0.22
+  rotate_escape_angular: 0.40
   rotate_escape_stop_confirm_ticks: 2
   rotate_escape_stationary_speed_threshold: 0.03
   rotate_escape_stationary_rpm_threshold: 1.0
   rotate_escape_stationary_confirm_samples: 2
-  rotate_escape_stop_timeout_sec: 3.0
+  rotate_escape_stop_timeout_sec: 5.0
   rotate_escape_direction_confirm_frames: 2
-  rotate_escape_pulse_sec: 0.80
+  rotate_escape_pulse_sec: 1.00
   rotate_escape_motion_response_timeout_sec: 1.50
   rotate_escape_motion_rpm_threshold: 1.0
   rotate_escape_motion_heading_delta_deg: 1.5
-  rotate_escape_settle_sec: 0.50
+  rotate_escape_settle_sec: 1.20
   rotate_escape_max_pulses: 6
-  rotate_escape_max_total_sec: 12.0
+  rotate_escape_max_total_sec: 18.0
   rotate_escape_safe_frame_confirm_count: 3
   rotate_escape_cooldown_sec: 5.0
   minimum_path_score: 0.55
@@ -78,25 +92,30 @@ mission1_autonomy:
   # The legacy candidate-score search does not have independent side-space
   # evidence. Keep it disabled; bounded rotate_escape above owns recovery.
   enable_search_rotate: false
-  search_rotate_angular: 0.22
+  search_rotate_angular: 0.40
   search_rotate_timeout_sec: 10.0
 
 control:
   linear_min: 0.0
   linear_max: 0.12
-  angular_min: -0.22
-  angular_max: 0.22
+  angular_min: -0.40
+  angular_max: 0.40
   command_smoothing_alpha: 0.25
   max_linear_delta_per_sec: 0.3
-  max_angular_delta_per_sec: 0.30
+  # Reach the measured 0.40 actuator threshold within a 0.60s pulse at the
+  # 5Hz controller rate; the old 0.30/s slew expired below the deadzone.
+  max_angular_delta_per_sec: 0.80
   reverse_angular_sign_slowdown: true
   angular_deadband: 0.03
 
 navigation:
-  # max_angular is capped at 0.15 in this attended profile, so retain the
-  # physically plausible heading-rate gate proven in uncalibrated tests.
+  # A live 0.40 in-place pulse changed orientation by 35 degrees between
+  # consecutive 2 Hz telemetry samples.  The old 30 deg/s limit therefore
+  # rejected a real turn forever (35 / 0.5 = 70 deg/s).  Keep margin for
+  # sample jitter while still rejecting the previously observed 84-170
+  # degree one-sample compass jumps.
   heading_filter_alpha: 0.2
-  max_heading_rate_deg_per_sec: 30.0
+  max_heading_rate_deg_per_sec: 90.0
   max_heading_sample_interval_sec: 0.5
 
 localization:
@@ -195,13 +214,23 @@ planner:
   # forward candidates are hard-rejected. It does not weaken candidate or
   # near-field collision rejection.
   side_sector_enabled: true
-  side_sector_top_ratio: 0.45
+  # The calibrated live frame's ground begins below the old 0.45 ROI.  At
+  # frame 680 the old band included the building/horizon and drove both side
+  # p20 scores to zero; starting at 0.55 measured the open left pavement at
+  # 99.8% traversable versus 86.3% beside the right wall.
+  side_sector_top_ratio: 0.55
   side_sector_bottom_exclude_ratio: 0.08
   side_sector_left_width_ratio: 0.30
   side_sector_right_width_ratio: 0.30
   side_sector_low_percentile: 20
   side_sector_traversable_score_threshold: 0.55
-  side_sector_min_traversable_ratio: 0.55
+  side_sector_min_traversable_ratio: 0.70
   side_sector_min_valid_pixel_ratio: 0.4
-  side_sector_stop_score: 0.5
-  side_sector_margin: 0.12
+  # Across 193 live frames on 2026-08-19, the visibly open left sector kept
+  # 74.7%+ of pixels above 0.55 while its 20th percentile varied from
+  # 0.195-0.406 with pavement lighting. Require a stronger 70% majority and
+  # retain a low-percentile floor that still rejects a materially blocked
+  # sector. These gates choose an in-place rotation direction only; forward
+  # motion still requires the unchanged metric near-field threshold above.
+  side_sector_stop_score: 0.15
+  side_sector_margin: 0.05

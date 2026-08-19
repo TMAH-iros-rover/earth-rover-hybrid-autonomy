@@ -445,6 +445,25 @@ class BrowserService:
         self.last_error = None
         return front_frame
 
+    async def frame_metadata(self, uid: int) -> dict:
+        """Return metadata for the frame most recently captured in the page."""
+
+        if self.page is None:
+            return {}
+        try:
+            metadata = await self.page.evaluate(
+                """(uid) => {
+                  if (typeof window.getLastFrameMetadata !== "function") {
+                    return null;
+                  }
+                  return window.getLastFrameMetadata(uid);
+                }""",
+                uid,
+            )
+        except Exception:
+            return {}
+        return metadata if isinstance(metadata, dict) else {}
+
     async def rear(self, timeout_sec: float | None = None) -> str:
         await self.initialize_browser()
         try:

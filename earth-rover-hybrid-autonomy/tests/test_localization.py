@@ -59,8 +59,8 @@ def test_stationary_jitter_is_reduced_relative_to_raw_gps() -> None:
 
 
 def test_step_change_in_true_position_converges_within_tolerance() -> None:
-    # Guards against the filter being tuned so conservatively it never
-    # tracks a real move -- the flip side of the jitter-reduction test.
+    # Guards against the filter being tuned so conservatively it never tracks
+    # real, physically gradual motion -- the flip side of outlier rejection.
     random.seed(2)
     clock = Clock()
     filt = ekf(clock, origin_lock_fix_count=3, max_linear_speed_mps=1.0)
@@ -73,9 +73,14 @@ def test_step_change_in_true_position_converges_within_tolerance() -> None:
         filt.observe_gps_heading(start_lat + noise(), start_lon + noise(), 0.0)
     assert filt.is_locked
 
-    for _ in range(40):
+    for step in range(1, 81):
         clock.value += 0.3
-        filt.observe_gps_heading(target_lat + noise(), target_lon + noise(), 0.0)
+        fraction = step / 80.0
+        filt.observe_gps_heading(
+            start_lat + (target_lat - start_lat) * fraction + noise(),
+            target_lon + noise(),
+            0.0,
+        )
 
     lat, lon, _ = filt.current_estimate()
     assert haversine_distance_m(lat, lon, target_lat, target_lon) < 5.0
@@ -109,7 +114,7 @@ def test_current_estimate_is_a_cheap_read_that_does_not_refuse() -> None:
 def test_origin_locks_to_the_average_of_the_first_n_fixes_not_a_single_one() -> None:
     clock = Clock()
     filt = ekf(clock, origin_lock_fix_count=3)
-    fixes = [(37.0, 127.0), (37.0002, 127.0), (37.0004, 127.0)]
+    fixes = [(37.0, 127.0), (37.00001, 127.0), (37.00002, 127.0)]
 
     assert filt.origin is None
     assert filt.current_estimate() == (None, None, None)
@@ -125,6 +130,93 @@ def test_origin_locks_to_the_average_of_the_first_n_fixes_not_a_single_one() -> 
     assert filt.origin == pytest.approx(
         (sum(f[0] for f in fixes) / 3, sum(f[1] for f in fixes) / 3)
     )
+
+
+def test_origin_does_not_lock_across_distant_multipath_clusters() -> None:
+    clock = Clock()
+    filt = ekf(clock, origin_lock_fix_count=3, origin_lock_max_spread_m=5.0)
+    cluster_a = (30.482479095458984, 114.30262756347656)
+    cluster_b = (30.482717514038086, 114.30302429199219)  # about 48 m away
+
+    for fix in (cluster_a, cluster_b, cluster_a, cluster_b):
+        clock.value += 0.5
+        filt.observe_gps_heading(*fix, 177.0)
+
+    assert filt.is_locked is False
+    assert filt.position_valid is False
+    assert filt.status()["position_status_reason"] == "ORIGIN_FIX_SPREAD_RESET"
+
+    for _ in range(2):
+        clock.value += 0.5
+        filt.observe_gps_heading(*cluster_b, 177.0)
+
+    assert filt.is_locked is True
+    assert filt.position_valid is True
+    assert haversine_distance_m(*filt.current_estimate()[:2], *cluster_b) < 0.5
+
+
+def test_reset_discards_previous_session_origin_and_reacquires() -> None:
+    clock = Clock()
+    filt = ekf(clock, origin_lock_fix_count=3)
+    first_session = (30.4826126, 114.3026733)
+    mission_session = (30.4824720, 114.3026428)
+
+    for _ in range(3):
+        clock.value += 0.5
+        filt.observe_gps_heading(*first_session, 167.0)
+    assert filt.is_locked is True
+    assert filt.position_valid is True
+
+    filt.reset()
+    assert filt.is_locked is False
+    assert filt.position_valid is False
+    assert filt.heading_valid is False
+    assert filt.current_estimate() == (None, None, None)
+    assert filt.status()["position_status_reason"] == "UNINITIALIZED"
+
+    for _ in range(3):
+        clock.value += 0.5
+        filt.observe_gps_heading(*mission_session, 181.0)
+
+    lat, lon, heading = filt.current_estimate()
+    assert filt.is_locked is True
+    assert filt.position_valid is True
+    assert filt.heading_valid is True
+    assert haversine_distance_m(lat, lon, *mission_session) < 0.5
+    assert heading == pytest.approx(181.0)
+
+
+def test_live_stationary_gps_cluster_jump_is_rejected_until_normal_fixes_recover() -> None:
+    clock = Clock()
+    filt = ekf(
+        clock,
+        origin_lock_fix_count=1,
+        position_outlier_reject_m=8.0,
+        position_recovery_streak=3,
+    )
+    good = (30.482479095458984, 114.30262756347656)
+    jumped = (30.482717514038086, 114.30302429199219)
+    filt.observe_gps_heading(*good, 177.0)
+    accepted = filt.current_estimate()[:2]
+
+    clock.value += 0.5
+    filt.observe_gps_heading(*jumped, 4.0)
+
+    assert filt.position_valid is False
+    assert filt.current_estimate()[:2] == pytest.approx(accepted)
+    assert filt.status()["position_status_reason"] == "POSITION_OUTLIER_REJECTED"
+    assert filt.status()["last_position_innovation_m"] > 40.0
+
+    for expected_count in (1, 2):
+        clock.value += 0.5
+        filt.observe_gps_heading(*good, 177.0)
+        assert filt.position_valid is False
+        assert filt.status()["position_recovery_count"] == expected_count
+
+    clock.value += 0.5
+    filt.observe_gps_heading(*good, 177.0)
+    assert filt.position_valid is True
+    assert filt.status()["position_status_reason"] == "OK"
 
 
 def test_gyro_bias_converges_toward_a_constant_simulated_bias() -> None:

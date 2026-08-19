@@ -64,12 +64,42 @@ def test_front_frame_returns_last_good_frame_after_transient_sdk_failure():
 
     recovered = first.get_front_frame()
 
-    assert recovered is cached
+    assert recovered is not cached
+    assert recovered.timestamp == cached.timestamp
+    assert recovered.source_frame_new is False
     assert recovered.sdk_timestamp == 1.0
     assert [call[0:2] for call in first.session.calls] == [
         ("GET", "/v2/front"),
         ("GET", "/front"),
     ]
+
+
+def test_duplicate_source_frame_id_preserves_first_seen_age(monkeypatch):
+    payload = {
+        "front_frame": encoded_image(),
+        "timestamp": 100.0,
+        "source_frame_id": "session:1000:42:10.0",
+        "source_media_time_sec": 10.0,
+    }
+    client = client_with({("GET", "/v2/front"): payload})
+    timestamps = iter((10.0, 20.0, 30.0))
+    monkeypatch.setattr("earth_rover.sdk_client.time.time", lambda: next(timestamps))
+
+    first = client.get_front_frame()
+    duplicate = client.get_front_frame()
+    client.session.routes[("GET", "/v2/front")] = {
+        **payload,
+        "source_frame_id": "session:1000:43:10.1",
+        "source_media_time_sec": 10.1,
+    }
+    fresh = client.get_front_frame()
+
+    assert first.source_frame_new is True
+    assert duplicate.source_frame_new is False
+    assert duplicate.timestamp == 10.0
+    assert duplicate.source_media_time_sec == 10.0
+    assert fresh.source_frame_new is True
+    assert fresh.timestamp == 30.0
 
 
 def test_mission_and_checkpoint_endpoints_match_official_sdk():

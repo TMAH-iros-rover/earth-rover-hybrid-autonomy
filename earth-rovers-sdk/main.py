@@ -634,6 +634,18 @@ async def select_mission(request: Request):
 
     global selected_mission_slug, checkpoints_list_data
     mission_slug = await request_mission_slug(request)
+    if (
+        active_session_mode in {"mission", "local_mission"}
+        and active_mission_slug
+        and active_mission_slug != mission_slug
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Mission {active_mission_slug} is active; end it before "
+                f"selecting {mission_slug}"
+            ),
+        )
     selected_mission_slug = mission_slug
     checkpoints_list_data = {}
     await get_checkpoints_list()
@@ -650,6 +662,18 @@ async def start_mission(request: Request):
     global auth_response_data, active_session_mode, active_mission_slug
     global selected_mission_slug, checkpoints_list_data
     mission_slug = await request_mission_slug(request)
+    if (
+        active_session_mode in {"mission", "local_mission"}
+        and active_mission_slug
+        and active_mission_slug != mission_slug
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Mission {active_mission_slug} is active; end it before "
+                f"starting {mission_slug}"
+            ),
+        )
     required_env_vars = ["SDK_API_TOKEN", "BOT_SLUG"]
     missing_vars = [var for var in required_env_vars if not os.getenv(var)]
 
@@ -932,8 +956,8 @@ async def connection_diagnostics():
 
 
 @app.post("/end-mission")
-async def end_mission():
-    global active_session_mode
+async def end_mission(request: Request):
+    global active_session_mode, selected_mission_slug
     required_env_vars = ["SDK_API_TOKEN", "BOT_SLUG"]
     missing_vars = [var for var in required_env_vars if not os.getenv(var)]
 
@@ -945,9 +969,18 @@ async def end_mission():
 
     auth_header = os.getenv("SDK_API_TOKEN")
     bot_slug = os.getenv("BOT_SLUG")
-    mission_slug = current_mission_slug()
+    mission_slug = await request_mission_slug(request)
     if not mission_slug:
         raise HTTPException(status_code=400, detail="No mission selected")
+    if active_mission_slug and active_mission_slug != mission_slug:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Mission {active_mission_slug} is active; refusing to end "
+                f"different mission {mission_slug}"
+            ),
+        )
+    selected_mission_slug = mission_slug
 
     if active_session_mode == "local_mission":
         await reset_local_bridge(send_stop=True)
@@ -1457,6 +1490,7 @@ async def get_front_frame():
     if front_frame:
         _, base64_data = front_frame.split(",", 1)
         response_data["front_frame"] = base64_data
+        response_data.update(await browser_service.frame_metadata(1000))
         current_timestamp = time.time()
         response_data["timestamp"] = current_timestamp
         response_data["server_timestamp"] = current_timestamp
