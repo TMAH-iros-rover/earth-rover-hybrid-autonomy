@@ -26,13 +26,10 @@
         <div class="actions">
           <label class="mission-picker">
             <span>Mission</span>
-            <input id="mission-slug" list="mission-options" value="mission-1" autocomplete="off" />
-            <datalist id="mission-options">
-              <option value="mission-1"></option>
-              <option value="mission1"></option>
-              <option value="mission-2"></option>
-              <option value="mission2"></option>
-            </datalist>
+            <select id="mission-slug">
+              <option value="mission-1">Mission 1</option>
+              <option value="mission-2">Mission 2</option>
+            </select>
           </label>
           <button id="connect-rover" class="primary" type="button">Connect Rover</button>
           <button id="start-mission" class="primary" type="button">Start Mission</button>
@@ -64,12 +61,105 @@
           </div>
           <div class="camera-stage">
             <img id="front-camera" alt="Earth Rover front camera" />
+            <svg
+              id="path-geometry-overlay"
+              class="path-geometry-overlay"
+              viewBox="0 0 1024 576"
+              preserveAspectRatio="xMidYMid meet"
+              aria-label="Planner candidate paths and selected rover footprint"
+            >
+              <g id="candidate-path-layer"></g>
+              <g id="selected-footprint-layer"></g>
+              <g id="global-heading-layer"></g>
+            </svg>
             <div id="camera-placeholder">Connect the rover or start a mission to load the front camera.</div>
+            <div id="drive-hud" class="drive-hud" hidden>
+              <span id="hud-path">PATH WAITING</span>
+              <span id="hud-command">CONTROL OFFLINE</span>
+            </div>
             <div id="side-sector-overlay" class="side-sector-overlay" aria-hidden="true">
               <div id="side-sector-left" class="side-sector-rect side-sector-left"></div>
               <div id="side-sector-right" class="side-sector-rect side-sector-right"></div>
             </div>
           </div>
+          <section class="drive-overview" aria-label="Local path and rover control overview">
+            <div class="path-intent">
+              <div class="drive-section-header">
+                <div>
+                  <span class="section-label">Path Intent</span>
+                  <strong id="path-direction-label">Waiting for planner</strong>
+                </div>
+                <span id="path-health" class="compact-state state-offline">OFFLINE</span>
+              </div>
+              <div class="path-direction-row">
+                <div class="direction-dial" aria-hidden="true">
+                  <span class="direction-axis axis-left">L</span>
+                  <span class="direction-axis axis-forward">FWD</span>
+                  <span class="direction-axis axis-right">R</span>
+                  <i id="path-direction-arrow" class="direction-arrow"></i>
+                </div>
+                <dl class="path-metrics">
+                  <div><dt>Selected</dt><dd id="path-selected-heading">-</dd></div>
+                  <div><dt>GPS error</dt><dd id="path-global-heading">-</dd></div>
+                  <div><dt>Path score</dt><dd id="path-score">-</dd></div>
+                  <div><dt>Plan age</dt><dd id="path-age">-</dd></div>
+                  <div><dt>Frame</dt><dd id="path-frame-id">-</dd></div>
+                  <div><dt>Plan</dt><dd id="path-plan-id">-</dd></div>
+                </dl>
+              </div>
+              <div id="candidate-strip" class="candidate-strip" aria-label="Planner heading candidates">
+                <span class="empty-candidates">Candidate paths waiting</span>
+              </div>
+              <p id="path-decision-reason" class="drive-reason">Start SAM-TP to inspect local path decisions.</p>
+            </div>
+
+            <div class="command-motion">
+              <div class="drive-section-header">
+                <div>
+                  <span class="section-label">Command &amp; Motion</span>
+                  <strong id="command-mode">Autonomy offline</strong>
+                </div>
+                <span id="command-health" class="compact-state state-offline">OFFLINE</span>
+              </div>
+              <div class="command-values">
+                <div class="command-value">
+                  <span>Internal command</span>
+                  <strong><b>L</b> <em id="internal-linear">0.000</em> <b>A</b> <em id="internal-angular">0.000</em></strong>
+                </div>
+                <div class="command-value">
+                  <span>SDK request</span>
+                  <strong><b>L</b> <em id="sdk-linear">0.000</em> <b>A</b> <em id="sdk-angular">0.000</em></strong>
+                </div>
+              </div>
+              <div class="command-gauges" aria-hidden="true">
+                <div class="linear-gauge"><i id="linear-gauge-fill"></i></div>
+                <div class="angular-gauge"><span></span><i id="angular-gauge-marker"></i></div>
+              </div>
+              <dl class="motion-metrics">
+                <div><dt>Transmit</dt><dd id="command-transmit">-</dd></div>
+                <div><dt>Command age</dt><dd id="command-age">-</dd></div>
+                <div><dt>Speed</dt><dd id="motion-speed">-</dd></div>
+                <div><dt>Wheel RPM</dt><dd id="motion-rpms">-</dd></div>
+                <div><dt>Command</dt><dd id="command-id">-</dd></div>
+                <div><dt>HTTP latency</dt><dd id="command-latency">-</dd></div>
+                <div><dt>Telemetry age</dt><dd id="motion-age">-</dd></div>
+                <div><dt>Response</dt><dd id="motion-response">UNMATCHED</dd></div>
+              </dl>
+              <p id="command-reason" class="drive-reason">Start Mission1 autonomy to inspect commands.</p>
+            </div>
+            <div class="control-trend">
+              <div class="trend-header">
+                <span class="section-label">Last 10 seconds</span>
+                <span class="trend-legend">
+                  <i class="trend-linear"></i>Linear
+                  <i class="trend-angular"></i>Angular
+                  <i class="trend-rpm"></i>RPM
+                  <i class="trend-heading"></i>Heading
+                </span>
+              </div>
+              <canvas id="control-trend-canvas" width="1200" height="150" aria-label="Recent command, RPM, and heading trend"></canvas>
+            </div>
+          </section>
           <div class="perception-legend">
             <span><i class="score-swatch low"></i>Low traversability</span>
             <span><i class="score-swatch high"></i>High traversability</span>

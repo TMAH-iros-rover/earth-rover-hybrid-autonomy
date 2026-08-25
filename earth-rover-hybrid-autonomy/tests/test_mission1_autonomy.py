@@ -210,7 +210,17 @@ def test_active_mission_tracks_valid_local_path():
     assert status["angular"] == pytest.approx(0.139626, rel=1e-4)
     assert sdk.commands[-1].angular == pytest.approx(-0.139626, rel=1e-4)
     assert status["sdk_angular"] == pytest.approx(-status["angular"], rel=1e-4)
+    assert status["sdk_linear"] == pytest.approx(sdk.commands[-1].linear, rel=1e-4)
     assert status["sdk_angular"] == pytest.approx(sdk.commands[-1].angular, rel=1e-4)
+    assert status["frame_id"] == "frame-00000001"
+    assert status["plan_id"] == "plan-00000001"
+    assert status["command_id"] == "cmd-00000001"
+    assert status["command_accepted"] is True
+    assert status["command_response_latency_ms"] >= 0.0
+    assert status["control_limits"] == {
+        "linear_max": 0.06,
+        "angular_max": 0.22,
+    }
 
 
 def test_positive_internal_angular_maps_to_negative_sdk_angular():
@@ -291,6 +301,11 @@ def test_control_send_failure_enters_cooldown_without_command_spam():
 
     assert first["state"] == "ERROR_STOP"
     assert "control 503" in first["reason"]
+    assert first["command_accepted"] is False
+    assert first["command_id"] == "cmd-00000001"
+    assert first["sdk_linear"] == pytest.approx(sdk.commands[0].linear)
+    assert first["sdk_angular"] == pytest.approx(sdk.commands[0].angular)
+    assert "control 503" in first["command_error"]
     assert second["state"] == "WAITING_FOR_CONTROL_BRIDGE"
     assert len(sdk.commands) == 1
 

@@ -237,6 +237,14 @@ def run_shadow_step(
     effective_fps = (frame_index + 1) / elapsed if elapsed > 0.0 else 0.0
     record = {
         "frame_index": frame_index,
+        "frame_id": (
+            str(frame.source_frame_id)
+            if frame.source_frame_id is not None
+            else f"frame-{frame_index:08d}"
+        ),
+        "plan_id": f"plan-{frame_index:08d}",
+        "frame_width": int(image_bgr.shape[1]),
+        "frame_height": int(image_bgr.shape[0]),
         "request_started_timestamp": request_started,
         "frame_received_timestamp": frame_received,
         "local_frame_timestamp": frame.timestamp,

@@ -712,6 +712,10 @@ def test_browser_bridge_publishes_latest_overlay_and_read_only_status() -> None:
         {
             "shadow_state": "CLEAR",
             "frame_index": 3,
+            "frame_id": "frame-source-3",
+            "plan_id": "plan-00000003",
+            "frame_width": 16,
+            "frame_height": 10,
             "inference_latency_ms": 91.0,
             "end_to_end_latency_ms": 130.0,
             "effective_fps": 7.5,
@@ -732,6 +736,10 @@ def test_browser_bridge_publishes_latest_overlay_and_read_only_status() -> None:
 
     assert snapshot.status["ready"] is True
     assert snapshot.status["frame_index"] == 3
+    assert snapshot.status["frame_id"] == "frame-source-3"
+    assert snapshot.status["plan_id"] == "plan-00000003"
+    assert snapshot.status["frame_width"] == 16
+    assert snapshot.status["frame_height"] == 10
     assert snapshot.status["command_transmitted"] is False
     assert snapshot.status["sdk_clock_offset_hours"] == 9
     assert snapshot.status["geometry_mode"] == "metric_projected"
@@ -743,6 +751,14 @@ def test_browser_bridge_publishes_latest_overlay_and_read_only_status() -> None:
     )
     assert snapshot.jpeg is not None
     assert snapshot.jpeg.startswith(b"\xff\xd8")
+
+    frame_timestamp = snapshot.status["frame_published_timestamp"]
+    store.publish_error(RuntimeError("next inference failed"))
+    stale = store.get().status
+    assert stale["state"] == "STALE_FRAME"
+    assert stale["frame_published_timestamp"] == frame_timestamp
+    assert stale["published_timestamp"] == frame_timestamp
+    assert stale["status_timestamp"] >= frame_timestamp
 
 
 def test_shadow_step_and_dashboard_surface_checkpoint_metadata() -> None:

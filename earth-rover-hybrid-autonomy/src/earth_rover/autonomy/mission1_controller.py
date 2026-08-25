@@ -418,6 +418,9 @@ class Mission1Autonomy:
         self._stg_motion_start_heading_deg: float | None = None
         self._stg_motion_last_telemetry_key: tuple[Any, Any] | None = None
         self._stg_cooldown_until = -math.inf
+        self._command_sequence = 0
+        self._current_observation: dict[str, Any] = {}
+        self._current_command_attempt: dict[str, Any] | None = None
         self._last_command = ControlCommand(0.0, 0.0, mode="STARTUP_STOP")
         self.status: dict[str, Any] = {
             "service": "mission1-autonomy",
@@ -426,6 +429,11 @@ class Mission1Autonomy:
             "command_transmitted": False,
             "linear": 0.0,
             "angular": 0.0,
+            "sdk_linear": 0.0,
+            "sdk_angular": 0.0,
+            "frame_id": None,
+            "plan_id": None,
+            "command_id": None,
             "reason": "Start Mission has not been pressed",
             "updated_timestamp": clock(),
         }
@@ -435,6 +443,8 @@ class Mission1Autonomy:
             return self._tick()
 
     def _tick(self) -> dict[str, Any]:
+        self._current_observation = {}
+        self._current_command_attempt = None
         now_mono = self.monotonic()
         dt = max(0.0, now_mono - self._previous_tick)
         self._previous_tick = now_mono
@@ -508,6 +518,23 @@ class Mission1Autonomy:
             )
 
         sam = self.sam_source.get()
+        frame_index = _integer(sam.get("frame_index"))
+        frame_id = sam.get("frame_id") or sam.get("source_frame_id")
+        self._current_observation = {
+            "source_frame_index": frame_index,
+            "frame_id": (
+                str(frame_id)
+                if frame_id is not None
+                else f"frame-{frame_index:08d}" if frame_index is not None else None
+            ),
+            "plan_id": sam.get("plan_id") or (
+                f"plan-{frame_index:08d}" if frame_index is not None else None
+            ),
+            "frame_published_timestamp": sam.get(
+                "frame_published_timestamp", sam.get("published_timestamp")
+            ),
+            "telemetry_age_sec": sam.get("telemetry_age_sec"),
+        }
         invalid = self._validate_sam_common(sam)
         if invalid is not None:
             if self.settings.enable_stop_turn_go:
@@ -2723,15 +2750,48 @@ class Mission1Autonomy:
 
     def _try_send_control(self, command: ControlCommand, now_mono: float) -> bool:
         sdk_command = mission1_command_to_sdk_command(command)
+        self._command_sequence += 1
+        command_id = f"cmd-{self._command_sequence:08d}"
+        request_timestamp = self.clock()
+        request_started_monotonic = self.monotonic()
+        self._current_command_attempt = {
+            "command_id": command_id,
+            "sdk_linear": float(sdk_command.linear),
+            "sdk_angular": float(sdk_command.angular),
+            "command_request_timestamp": request_timestamp,
+            "command_response_timestamp": None,
+            "command_response_latency_ms": None,
+            "command_accepted": False,
+        }
         try:
             self.sdk.send_control(sdk_command)
         except Exception as exc:
+            response_timestamp = self.clock()
+            self._current_command_attempt.update(
+                {
+                    "command_response_timestamp": response_timestamp,
+                    "command_response_latency_ms": max(
+                        0.0, (self.monotonic() - request_started_monotonic) * 1000.0
+                    ),
+                    "command_error": f"{type(exc).__name__}: {exc}",
+                }
+            )
             self._last_control_error = f"{type(exc).__name__}: {exc}"
             self._control_error_cooldown_until = (
                 now_mono + self.settings.control_error_cooldown_sec
             )
             self._last_command = ControlCommand(0.0, 0.0, mode="CONTROL_SEND_FAILED")
             return False
+        self._current_command_attempt.update(
+            {
+                "command_response_timestamp": self.clock(),
+                "command_response_latency_ms": max(
+                    0.0, (self.monotonic() - request_started_monotonic) * 1000.0
+                ),
+                "command_accepted": True,
+                "command_error": None,
+            }
+        )
         return True
 
     def _publish(
@@ -2743,6 +2803,8 @@ class Mission1Autonomy:
         **extra: Any,
     ) -> dict[str, Any]:
         command = command or self._last_command
+        command_attempt = dict(self._current_command_attempt or {})
+        requested_sdk_command = mission1_command_to_sdk_command(command)
         self.status = {
             "service": "mission1-autonomy",
             "armed": self.live_control_enabled,
@@ -2750,10 +2812,41 @@ class Mission1Autonomy:
             "command_transmitted": transmitted,
             "linear": float(command.linear),
             "angular": float(command.angular),
-            # The value actually sent to the rover over /control, once
-            # command_transmitted is true. "angular" above stays in Mission1's
-            # internal positive-right convention; this is post sign-flip.
-            "sdk_angular": mission1_to_sdk_angular(command.angular),
+            # Exact post-conversion request values when a /control attempt was
+            # made; otherwise these are the values that would have been sent.
+            # "angular" above stays in Mission1's positive-right convention.
+            "sdk_linear": command_attempt.get(
+                "sdk_linear", float(requested_sdk_command.linear)
+            ),
+            "sdk_angular": command_attempt.get(
+                "sdk_angular", float(requested_sdk_command.angular)
+            ),
+            "command_mode": command.mode,
+            "frame_id": self._current_observation.get("frame_id"),
+            "source_frame_index": self._current_observation.get("source_frame_index"),
+            "plan_id": self._current_observation.get("plan_id"),
+            "frame_published_timestamp": self._current_observation.get(
+                "frame_published_timestamp"
+            ),
+            "source_telemetry_age_sec": self._current_observation.get(
+                "telemetry_age_sec"
+            ),
+            "command_id": command_attempt.get("command_id"),
+            "command_request_timestamp": command_attempt.get(
+                "command_request_timestamp"
+            ),
+            "command_response_timestamp": command_attempt.get(
+                "command_response_timestamp"
+            ),
+            "command_response_latency_ms": command_attempt.get(
+                "command_response_latency_ms"
+            ),
+            "command_accepted": command_attempt.get("command_accepted", False),
+            "command_error": command_attempt.get("command_error"),
+            "control_limits": {
+                "linear_max": self.settings.max_linear,
+                "angular_max": self.settings.max_angular,
+            },
             "reason": reason,
             "updated_timestamp": self.clock(),
             **extra,

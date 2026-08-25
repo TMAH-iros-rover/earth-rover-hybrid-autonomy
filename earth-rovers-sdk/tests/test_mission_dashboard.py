@@ -182,8 +182,11 @@ def test_dashboard_javascript_has_no_control_endpoint() -> None:
     assert 'id="view-raw"' in html
     assert 'id="view-sam-tp"' in html
     assert 'id="sam-tp-metrics"' in html
-    assert '<option value="mission-2"></option>' in html
-    assert '<option value="mission2"></option>' in html
+    assert '<select id="mission-slug">' in html
+    assert '<option value="mission-1">Mission 1</option>' in html
+    assert '<option value="mission-2">Mission 2</option>' in html
+    assert '<option value="mission1">' not in html
+    assert '<option value="mission2">' not in html
     assert "GPS shortest path" in html
     assert "SAM-TP heading-aware local path" in html
     assert "GPS trail (≥2 m)" in html
@@ -235,6 +238,79 @@ def test_dashboard_renders_rotate_escape_side_sector_and_recovery_state() -> Non
     assert ".side-sector-rect" in css
     assert ".side-sector-rect.chosen" in css
     assert ".recovery-metrics" in css
+
+
+def test_dashboard_renders_path_intent_command_and_motion_overview() -> None:
+    js = (ROOT / "static/mission_dashboard.js").read_text(encoding="utf-8")
+    html = (ROOT / "static/mission_dashboard.html").read_text(encoding="utf-8")
+    css = (ROOT / "static/mission_dashboard.css").read_text(encoding="utf-8")
+
+    for element_id in (
+        "drive-hud",
+        "path-direction-arrow",
+        "path-selected-heading",
+        "path-global-heading",
+        "path-score",
+        "path-age",
+        "path-frame-id",
+        "path-plan-id",
+        "path-geometry-overlay",
+        "candidate-strip",
+        "command-mode",
+        "internal-linear",
+        "internal-angular",
+        "sdk-linear",
+        "sdk-angular",
+        "command-transmit",
+        "command-age",
+        "motion-speed",
+        "motion-rpms",
+        "command-id",
+        "command-latency",
+        "motion-age",
+        "motion-response",
+        "control-trend-canvas",
+    ):
+        assert f'id="{element_id}"' in html
+
+    assert "function renderDriveOverview()" in js
+    assert "function renderPathIntent()" in js
+    assert "function renderCandidateStrip(planner)" in js
+    assert "function renderCommandMotion()" in js
+    assert "planner.candidate_scores" in js
+    assert "planner.selected_candidate_heading_deg" in js
+    assert "status?.sdk_angular" in js
+    assert "status?.command_transmitted" in js
+    assert "state.latestMissionStatus?.last_control_command_age_sec" in js
+    assert '"HTTP ACCEPTED"' in js
+    assert '"WAIT MOTION"' in js
+    assert '"NO RESPONSE"' in js
+    assert '"NO TELEMETRY"' in js
+    assert '"STOPPING"' in js
+    assert '"PLAN LAG"' in js
+    assert '"PLAN STALE"' in js
+    assert "frame_published_timestamp" in js
+    assert "function renderPathGeometry(status, planner, stale)" in js
+    assert "function drawControlTrend()" in js
+    assert "candidate.centerline_uv" in js
+    assert "selectedCandidate.left_boundary_uv" in js
+    assert "status?.command_accepted" in js
+    assert "status?.command_response_latency_ms" in js
+    assert "status?.sdk_linear" in js
+    assert 'sam?.state === "CLEAR"' in js
+    assert "directSourceAge" in js
+    assert '"/control"' not in js
+
+    assert ".drive-overview" in css
+    assert ".candidate-item.selected" in css
+    assert ".candidate-item.rejected" in css
+    assert ".direction-arrow" in css
+    assert ".linear-gauge" in css
+    assert ".angular-gauge" in css
+    assert ".candidate-path.rejected" in css
+    assert ".selected-footprint" in css
+    assert ".global-heading-line" in css
+    assert ".control-trend" in css
 
 
 def test_direct_rover_connect_uses_auth_and_browser_bridge(monkeypatch) -> None:

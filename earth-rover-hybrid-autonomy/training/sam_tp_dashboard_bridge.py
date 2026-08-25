@@ -48,15 +48,22 @@ class DashboardSnapshotStore:
         )
         if not encoded:
             raise ValueError("could not encode SAM-TP dashboard image")
+        published_timestamp = time.time()
         status = {
             "service": "sam-tp-shadow",
             "ready": True,
             "state": str(record["shadow_state"]),
             "frame_index": int(record["frame_index"]),
+            "frame_id": record.get("frame_id"),
+            "plan_id": record.get("plan_id"),
+            "frame_width": record.get("frame_width"),
+            "frame_height": record.get("frame_height"),
             "source_frame_id": record.get("source_frame_id"),
             "source_media_time_sec": record.get("source_media_time_sec"),
             "source_frame_new": record.get("source_frame_new"),
-            "published_timestamp": time.time(),
+            "published_timestamp": published_timestamp,
+            "frame_published_timestamp": published_timestamp,
+            "status_timestamp": published_timestamp,
             "inference_latency_ms": float(record["inference_latency_ms"]),
             "planner_latency_ms": float(record.get("planner_latency_ms", 0.0)),
             "end_to_end_latency_ms": float(record["end_to_end_latency_ms"]),
@@ -129,7 +136,10 @@ class DashboardSnapshotStore:
                     "ready": previous_frame_available,
                     "state": "STALE_FRAME" if previous_frame_available else "ERROR",
                     "last_error": f"{type(error).__name__}: {error}",
-                    "published_timestamp": time.time(),
+                    # Keep published_timestamp/frame_published_timestamp tied
+                    # to the previous successful frame. Refreshing it here
+                    # made an old path look current after inference failed.
+                    "status_timestamp": time.time(),
                     "command_transmitted": False,
                 }
             )

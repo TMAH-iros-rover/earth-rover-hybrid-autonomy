@@ -475,6 +475,11 @@ def test_metric_mode_with_valid_calibration_projects_and_selects_a_candidate() -
     assert plan.selected_candidate is not None
     assert plan.selected_candidate.footprint_pixel_count > 0
     assert plan.selected_candidate.heading_deg == pytest.approx(0.0, abs=1.0)
+    status = plan.selected_candidate.to_status()
+    assert len(status["centerline_uv"]) >= 2
+    assert len(status["left_boundary_uv"]) >= 2
+    assert len(status["right_boundary_uv"]) >= 2
+    assert all(len(point) == 2 for point in status["centerline_uv"])
 
 
 def test_metric_mode_obstacle_in_footprint_hard_rejects_that_candidate() -> None:

@@ -240,6 +240,12 @@ class CandidateScore:
     hard_rejected: bool
     reject_reason: str | None
     points_uv: np.ndarray = field(repr=False)
+    left_boundary_uv: np.ndarray = field(
+        default_factory=lambda: np.zeros((0, 2), dtype=np.int32), repr=False
+    )
+    right_boundary_uv: np.ndarray = field(
+        default_factory=lambda: np.zeros((0, 2), dtype=np.int32), repr=False
+    )
     footprint_pixel_count: int = 0
     projected_coverage_ratio: float = 1.0
 
@@ -266,6 +272,9 @@ class CandidateScore:
             "reject_reason": self.reject_reason,
             "footprint_pixel_count": self.footprint_pixel_count,
             "projected_coverage_ratio": self.projected_coverage_ratio,
+            "centerline_uv": self.points_uv.astype(int, copy=False).tolist(),
+            "left_boundary_uv": self.left_boundary_uv.astype(int, copy=False).tolist(),
+            "right_boundary_uv": self.right_boundary_uv.astype(int, copy=False).tolist(),
         }
 
 
@@ -994,6 +1003,8 @@ class MotionPrimitivePlanner:
                         else "FOOTPRINT_UNSAFE" if footprint_unsafe else None
                     ),
                     points_uv=footprint.centerline_uv,
+                    left_boundary_uv=footprint.left_uv,
+                    right_boundary_uv=footprint.right_uv,
                     footprint_pixel_count=footprint.footprint_pixel_count,
                     projected_coverage_ratio=footprint.coverage_ratio,
                 )
