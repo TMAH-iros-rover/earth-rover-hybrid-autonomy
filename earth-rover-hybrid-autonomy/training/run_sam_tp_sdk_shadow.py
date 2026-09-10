@@ -33,6 +33,10 @@ from training.sam_tp_reproduction import (  # noqa: E402
     git_provenance,
     sha256_file,
 )
+from training.hf_sam_tp_predictor import (  # noqa: E402
+    DEFAULT_BASE_MODEL_ID,
+    HfSamTpPredictor,
+)
 from training.sam_tp_sdk_shadow import (  # noqa: E402
     run_shadow_step,
     write_shadow_summary,
@@ -49,10 +53,28 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         )
     )
     parser.add_argument("--config", default="configs/default.yaml")
-    parser.add_argument("--upstream-root", required=True)
-    parser.add_argument("--model-config", required=True)
+    parser.add_argument(
+        "--predictor-backend",
+        choices=("official", "hf"),
+        default="official",
+        help=(
+            "official: frozen upstream sam2.sam_tp checkout (requires "
+            "--upstream-root/--model-config/--expected-checkpoint-sha256). "
+            "hf: a self-trained transformers.Sam2Model checkpoint, e.g. "
+            "checkpoints/sam_tp/best_sam_tp.pt from "
+            "scripts/GeNIE_ws/pre_processing_dataset_withSAM2/03_train_sam_tp.py "
+            "(requires only --checkpoint)."
+        ),
+    )
+    parser.add_argument("--upstream-root")
+    parser.add_argument("--model-config")
     parser.add_argument("--checkpoint", required=True)
-    parser.add_argument("--expected-checkpoint-sha256", required=True)
+    parser.add_argument("--expected-checkpoint-sha256")
+    parser.add_argument(
+        "--hf-sam2-model",
+        default=DEFAULT_BASE_MODEL_ID,
+        help="base HF model id the --predictor-backend hf checkpoint was fine-tuned from",
+    )
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--target-fps", type=float, default=8.0)
     parser.add_argument("--telemetry-hz", type=float, default=2.0)
@@ -83,7 +105,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--no-browser-bridge", action="store_true")
     parser.add_argument(
         "--planner-mode",
-        choices=("connected_path", "motion_primitives", "gps_only"),
+        choices=("connected_path", "motion_primitives", "gps_only", "genie_cluster"),
         help="override planner.mode from config for A/B testing",
     )
     return parser.parse_args(argv)
@@ -111,25 +133,38 @@ def main(argv: list[str] | None = None) -> int:
     if show_window and sys.platform.startswith("linux") and not os.environ.get("DISPLAY"):
         raise SystemExit("DISPLAY is unavailable; omit --show-window")
 
-    upstream = Path(args.upstream_root).expanduser().resolve()
-    model_config = Path(args.model_config).expanduser().resolve()
     checkpoint = Path(args.checkpoint).expanduser().resolve()
     output = Path(args.output_dir).expanduser().resolve()
     config_path = _rooted(args.config)
-    for path in (upstream, model_config, checkpoint, config_path):
+    required_paths = [checkpoint, config_path]
+    upstream: Path | None = None
+    model_config: Path | None = None
+    if args.predictor_backend == "official":
+        if args.upstream_root is None or args.model_config is None or args.expected_checkpoint_sha256 is None:
+            raise SystemExit(
+                "--predictor-backend official requires --upstream-root, --model-config, "
+                "and --expected-checkpoint-sha256"
+            )
+        upstream = Path(args.upstream_root).expanduser().resolve()
+        model_config = Path(args.model_config).expanduser().resolve()
+        required_paths += [upstream, model_config]
+    for path in required_paths:
         if not path.exists():
             raise SystemExit(f"required input does not exist: {path}")
     if output.exists():
         raise SystemExit(f"output already exists: {output}")
-    provenance = git_provenance(upstream)
-    if provenance["commit"] != OFFICIAL_COMMIT or provenance["dirty"]:
-        raise SystemExit(f"upstream checkout is not the frozen clean commit: {provenance}")
     checkpoint_sha = sha256_file(checkpoint)
-    if checkpoint_sha != args.expected_checkpoint_sha256:
-        raise SystemExit(
-            "checkpoint SHA-256 differs from the explicitly approved value: "
-            f"expected={args.expected_checkpoint_sha256} actual={checkpoint_sha}"
-        )
+    if args.predictor_backend == "official":
+        provenance = git_provenance(upstream)
+        if provenance["commit"] != OFFICIAL_COMMIT or provenance["dirty"]:
+            raise SystemExit(f"upstream checkout is not the frozen clean commit: {provenance}")
+        if checkpoint_sha != args.expected_checkpoint_sha256:
+            raise SystemExit(
+                "checkpoint SHA-256 differs from the explicitly approved value: "
+                f"expected={args.expected_checkpoint_sha256} actual={checkpoint_sha}"
+            )
+    else:
+        print(f"predictor-backend=hf  checkpoint_sha256={checkpoint_sha}", flush=True)
 
     config = load_config(config_path)
     planner_cfg = dict(config.get("planner", {}))
@@ -150,12 +185,19 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("SAM-TP shadow mode requires torch in its independent environment") from exc
     if not torch.cuda.is_available():
         raise SystemExit("SAM-TP shadow mode requires CUDA")
-    predictor = SamTpPredictor(
-        upstream,
-        model_config,
-        checkpoint,
-        synchronize=torch.cuda.synchronize,
-    )
+    if args.predictor_backend == "official":
+        predictor = SamTpPredictor(
+            upstream,
+            model_config,
+            checkpoint,
+            synchronize=torch.cuda.synchronize,
+        )
+    else:
+        predictor = HfSamTpPredictor(
+            checkpoint,
+            base_model_id=args.hf_sam2_model,
+            synchronize=torch.cuda.synchronize,
+        )
     phase1_processor = SamTpPhase1FrameProcessor(
         predictor,
         ConstantCurvatureTrajectorySampler(
@@ -234,6 +276,12 @@ def main(argv: list[str] | None = None) -> int:
                                     max_heading_rate_deg_per_sec=(
                                         float(navigation_cfg["max_heading_rate_deg_per_sec"])
                                         if navigation_cfg.get("max_heading_rate_deg_per_sec")
+                                        is not None
+                                        else None
+                                    ),
+                                    max_gps_jump_speed_mps=(
+                                        float(navigation_cfg["max_gps_jump_speed_mps"])
+                                        if navigation_cfg.get("max_gps_jump_speed_mps")
                                         is not None
                                         else None
                                     ),

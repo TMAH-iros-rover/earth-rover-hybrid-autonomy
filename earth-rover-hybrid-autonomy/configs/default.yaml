@@ -76,6 +76,16 @@ navigation:
   # search_rotate_angular, but well below the noise observed above -- set
   # to null to disable.
   max_heading_rate_deg_per_sec: 120.0
+  # Reject a GPS fix if it implies a ground speed faster than this rover can
+  # physically reach, holding the last accepted (lat, lon) instead
+  # (checkpoint_route.py:_sanitize_position). Unlike max_heading_rate_deg_per_sec,
+  # there is no single safe constant here: normal GPS jitter (a few meters)
+  # over one telemetry interval already implies several m/s of "speed" purely
+  # from noise, so this must be tuned from an actual logged GPS trace (look at
+  # the size and duration of the observed jumps) rather than guessed -- set
+  # too low, it will reject real slow driving as noise. null disables the
+  # guard (the previous, unfiltered behavior).
+  max_gps_jump_speed_mps: null
 
 planner:
   mode: motion_primitives
@@ -126,6 +136,22 @@ planner:
   corridor_half_width_ratio: 0.025
   maximum_visual_heading_deg: 55.0
   debug_candidate_scores: true
+  # Only used when mode: genie_cluster (opt in with
+  # --planner-mode genie_cluster for A/B testing against motion_primitives).
+  # Ports the GeNIE paper's Algorithm 1 (Sec III-D) into image-space: sample a
+  # fan of candidate paths, keep the top-K by traversability, cluster them
+  # (silhouette-selected k-means), merge close clusters, then pick the
+  # cluster whose heading is angularly closest to the GPS goal direction.
+  # min_candidate_commit_sec/switch_confirm_count above still gate how often
+  # the committed heading can change, since the paper itself does not specify
+  # live-control temporal behavior and per-frame reclustering is noisy.
+  genie_n_candidates: 25
+  genie_top_k: 8
+  genie_k_max: 6
+  genie_waypoint_count: 10
+  genie_curvature_jitter: 0.2
+  genie_merge_threshold_ratio: 0.05
+  genie_switch_heading_deadband_deg: 6.0
 
 perception:
   input_width: 320

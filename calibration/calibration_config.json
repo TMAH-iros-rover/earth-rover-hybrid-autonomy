@@ -1,0 +1,13 @@
+{
+  "base_url": "http://localhost:8000",
+  "camera": "front",
+  "checkerboard": {
+    "inner_corners_cols": 7,
+    "inner_corners_rows": 10,
+    "square_size_mm": 25.0
+  },
+  "request_timeout_sec": 2.0,
+  "images_dir": "images/front",
+  "result_file": "results/front_camera.json",
+  "verification_alpha": 0.0
+}

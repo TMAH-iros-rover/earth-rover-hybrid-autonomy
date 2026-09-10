@@ -101,6 +101,61 @@ def test_shadow_launcher_defaults_to_browser_only_without_opencv_window() -> Non
     assert args.headless is False
 
 
+def test_shadow_launcher_defaults_to_official_predictor_backend() -> None:
+    args = parse_args(
+        [
+            "--upstream-root",
+            "upstream",
+            "--model-config",
+            "model.yaml",
+            "--checkpoint",
+            "checkpoint.pt",
+            "--expected-checkpoint-sha256",
+            "abc",
+            "--output-dir",
+            "output",
+        ]
+    )
+
+    assert args.predictor_backend == "official"
+
+
+def test_shadow_launcher_accepts_hf_predictor_backend_with_only_checkpoint() -> None:
+    args = parse_args(
+        [
+            "--predictor-backend",
+            "hf",
+            "--checkpoint",
+            "checkpoints/sam_tp/best_sam_tp.pt",
+            "--output-dir",
+            "output",
+        ]
+    )
+
+    assert args.predictor_backend == "hf"
+    assert args.upstream_root is None
+    assert args.model_config is None
+    assert args.expected_checkpoint_sha256 is None
+    assert args.hf_sam2_model == "facebook/sam2.1-hiera-tiny"
+
+
+def test_shadow_launcher_planner_mode_accepts_genie_cluster() -> None:
+    args = parse_args(
+        [
+            "--predictor-backend",
+            "hf",
+            "--checkpoint",
+            "checkpoint.pt",
+            "--output-dir",
+            "output",
+            "--planner-mode",
+            "genie_cluster",
+        ]
+    )
+
+    assert args.planner_mode == "genie_cluster"
+
+
 def test_shadow_launcher_accepts_read_only_route_latest_override() -> None:
     args = parse_args(
         [

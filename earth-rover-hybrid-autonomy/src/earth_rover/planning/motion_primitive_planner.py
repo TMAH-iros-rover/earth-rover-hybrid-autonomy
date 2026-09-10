@@ -44,6 +44,22 @@ class MotionPrimitivePlannerConfig:
     maximum_visual_heading_deg: float = 55.0
     debug_candidate_scores: bool = True
 
+    # GeNIE-paper-style path generation (Sec III-D, Algorithm 1): sample a fan
+    # of candidate paths, keep the top-K by traversability, cluster them
+    # (silhouette-selected k-means) to fuse near-duplicates, merge close
+    # clusters, then pick the cluster whose heading is angularly closest to
+    # the GPS goal direction. Only used when mode == "genie_cluster"; the
+    # temporal hold/confirm gating below still applies so the live controller
+    # does not oscillate between angularly-close clusters frame to frame --
+    # the paper itself does not specify live-control temporal behavior.
+    genie_n_candidates: int = 25
+    genie_top_k: int = 8
+    genie_k_max: int = 6
+    genie_waypoint_count: int = 10
+    genie_curvature_jitter: float = 0.2
+    genie_merge_threshold_ratio: float = 0.05
+    genie_switch_heading_deadband_deg: float = 6.0
+
     @classmethod
     def from_dict(cls, config: dict[str, Any] | None) -> "MotionPrimitivePlannerConfig":
         values = dict(config or {})
@@ -52,8 +68,10 @@ class MotionPrimitivePlannerConfig:
         return cls(**{key: values[key] for key in cls.__dataclass_fields__ if key in values})
 
     def validate(self) -> None:
-        if self.mode not in {"connected_path", "motion_primitives", "gps_only"}:
-            raise ValueError("planner.mode must be connected_path, motion_primitives, or gps_only")
+        if self.mode not in {"connected_path", "motion_primitives", "gps_only", "genie_cluster"}:
+            raise ValueError(
+                "planner.mode must be connected_path, motion_primitives, gps_only, or genie_cluster"
+            )
         if len(self.candidate_headings_deg) < 7:
             raise ValueError("planner.candidate_headings_deg must contain at least 7 candidates")
         if any(not math.isfinite(v) for v in self.candidate_headings_deg):
@@ -76,6 +94,24 @@ class MotionPrimitivePlannerConfig:
             value = float(getattr(self, name))
             if not math.isfinite(value) or value <= 0.0:
                 raise ValueError(f"planner.{name} must be finite and positive")
+        if self.mode == "genie_cluster":
+            if self.genie_n_candidates < 5:
+                raise ValueError("planner.genie_n_candidates must be >= 5")
+            if self.genie_top_k < 1:
+                raise ValueError("planner.genie_top_k must be >= 1")
+            if self.genie_k_max < 2:
+                raise ValueError("planner.genie_k_max must be >= 2")
+            if self.genie_waypoint_count < 3:
+                raise ValueError("planner.genie_waypoint_count must be >= 3")
+            if self.genie_curvature_jitter < 0.0:
+                raise ValueError("planner.genie_curvature_jitter must be >= 0")
+            if not math.isfinite(self.genie_merge_threshold_ratio) or self.genie_merge_threshold_ratio <= 0.0:
+                raise ValueError("planner.genie_merge_threshold_ratio must be finite and positive")
+            if (
+                not math.isfinite(self.genie_switch_heading_deadband_deg)
+                or self.genie_switch_heading_deadband_deg < 0.0
+            ):
+                raise ValueError("planner.genie_switch_heading_deadband_deg must be finite and non-negative")
 
 
 @dataclass(frozen=True)
@@ -225,6 +261,15 @@ class MotionPrimitivePlanner:
         self._switch_confirm_count = 0
         self._previous_target_heading_deg: float | None = None
         self._previous_checkpoint_sequence: int | None = None
+        # genie_cluster mode keeps its own committed-heading state instead of
+        # reusing the fixed-candidate-index state above, because the number
+        # and identity of clusters can change from frame to frame. It still
+        # shares self._last_valid_candidate_time/self._last_plan with the
+        # other modes for the transient-hold grace period in plan()'s tail.
+        self._genie_selected_heading: float | None = None
+        self._genie_selected_since: float | None = None
+        self._genie_switch_pending_heading: float | None = None
+        self._genie_switch_confirm_count = 0
 
     def reset(self) -> None:
         self._selected_index = None
@@ -236,6 +281,10 @@ class MotionPrimitivePlanner:
         self._switch_confirm_count = 0
         self._previous_target_heading_deg = None
         self._previous_checkpoint_sequence = None
+        self._genie_selected_heading = None
+        self._genie_selected_since = None
+        self._genie_switch_pending_heading = None
+        self._genie_switch_confirm_count = 0
 
     def plan(
         self,
@@ -285,33 +334,45 @@ class MotionPrimitivePlanner:
                 now=now,
             )
 
-        candidates = self._score_candidates(score, valid, target_heading_deg)
-        for candidate in candidates:
-            previous = self._score_ema.get(candidate.index, candidate.final_score_raw)
-            self._score_ema[candidate.index] = (
-                self.config.candidate_score_ema_alpha * candidate.final_score_raw
-                + (1.0 - self.config.candidate_score_ema_alpha) * previous
+        if self.config.mode == "genie_cluster":
+            candidates, selected, switched, switch_reason, near_field_safe, near_field_score = (
+                self._genie_cluster_plan(
+                    score,
+                    valid,
+                    target_heading_deg=target_heading_deg,
+                    now=now,
+                    checkpoint_changed=checkpoint_changed,
+                    large_target_change=large_target_change,
+                )
             )
-        candidates = tuple(
-            CandidateScore(
-                **{
-                    **candidate.__dict__,
-                    "final_score": float(self._score_ema.get(candidate.index, candidate.final_score_raw)),
-                }
+        else:
+            candidates = self._score_candidates(score, valid, target_heading_deg)
+            for candidate in candidates:
+                previous = self._score_ema.get(candidate.index, candidate.final_score_raw)
+                self._score_ema[candidate.index] = (
+                    self.config.candidate_score_ema_alpha * candidate.final_score_raw
+                    + (1.0 - self.config.candidate_score_ema_alpha) * previous
+                )
+            candidates = tuple(
+                CandidateScore(
+                    **{
+                        **candidate.__dict__,
+                        "final_score": float(self._score_ema.get(candidate.index, candidate.final_score_raw)),
+                    }
+                )
+                for candidate in candidates
             )
-            for candidate in candidates
-        )
-        safe_candidates = [candidate for candidate in candidates if not candidate.hard_rejected]
-        near_field_score = max((candidate.near_field_low_percentile for candidate in candidates), default=0.0)
-        all_near_unsafe = bool(candidates) and all(candidate.hard_rejected for candidate in candidates)
-        near_field_safe = not all_near_unsafe and near_field_score >= self.config.near_field_stop_threshold
+            safe_candidates = [candidate for candidate in candidates if not candidate.hard_rejected]
+            near_field_score = max((candidate.near_field_low_percentile for candidate in candidates), default=0.0)
+            all_near_unsafe = bool(candidates) and all(candidate.hard_rejected for candidate in candidates)
+            near_field_safe = not all_near_unsafe and near_field_score >= self.config.near_field_stop_threshold
 
-        selected, switched, switch_reason = self._select_candidate(
-            safe_candidates,
-            now=now,
-            checkpoint_changed=checkpoint_changed,
-            large_target_change=large_target_change,
-        )
+            selected, switched, switch_reason = self._select_candidate(
+                safe_candidates,
+                now=now,
+                checkpoint_changed=checkpoint_changed,
+                large_target_change=large_target_change,
+            )
         using_held = False
         plan_age = None
         if selected is None:
@@ -396,10 +457,18 @@ class MotionPrimitivePlanner:
             plan_age_sec=plan_age,
             candidate_switched=switched,
             switch_reason=switch_reason,
-            selected_candidate_since=self._selected_since,
+            selected_candidate_since=(
+                self._genie_selected_since if self.config.mode == "genie_cluster" else self._selected_since
+            ),
             last_valid_candidate_time=self._last_valid_candidate_time,
-            switch_pending_index=self._switch_pending_index,
-            switch_confirm_count=self._switch_confirm_count,
+            switch_pending_index=(
+                None if self.config.mode == "genie_cluster" else self._switch_pending_index
+            ),
+            switch_confirm_count=(
+                self._genie_switch_confirm_count
+                if self.config.mode == "genie_cluster"
+                else self._switch_confirm_count
+            ),
         )
         self._last_plan = plan
         return plan
@@ -628,6 +697,241 @@ class MotionPrimitivePlanner:
         self._last_plan = plan
         return plan
 
+    def _build_genie_candidate(
+        self,
+        score: np.ndarray,
+        valid: np.ndarray,
+        heading_deg: float,
+        *,
+        target_heading_deg: float,
+        maximum_heading: float,
+        points_xy: np.ndarray | None = None,
+        curvature_exponent: float = 1.45,
+    ) -> CandidateScore | None:
+        shape = score.shape
+        if points_xy is None:
+            points_xy = genie_candidate_points(
+                shape,
+                heading_deg,
+                maximum_visual_heading_deg=maximum_heading,
+                n_waypoints=self.config.genie_waypoint_count,
+                curvature_exponent=curvature_exponent,
+            )
+        sampled, sampled_valid, rows, _cols = sample_score_along_path(score, valid, points_xy)
+        valid_sampled = sampled[sampled_valid]
+        if valid_sampled.size == 0:
+            return None
+        weights = primitive_sample_weights(rows, shape[0])
+        weighted_mean = float(np.average(sampled, weights=weights))
+        low_percentile = float(np.percentile(valid_sampled, self.config.full_path_percentile))
+        near_count = max(2, int(math.ceil(len(points_xy) * 0.35)))
+        near_scores = sampled[:near_count]
+        near_low = float(np.percentile(near_scores, self.config.near_field_percentile))
+        hard_rejected = near_low < self.config.near_field_stop_threshold
+        goal_error = abs(normalize_angle_deg(float(heading_deg) - target_heading_deg))
+        points_int = np.stack(
+            (
+                np.clip(np.rint(points_xy[:, 0]), 0, shape[1] - 1),
+                np.clip(np.rint(points_xy[:, 1]), 0, shape[0] - 1),
+            ),
+            axis=1,
+        ).astype(np.int32)
+        rank = 0.70 * weighted_mean + 0.30 * low_percentile
+        return CandidateScore(
+            index=0,
+            heading_deg=float(heading_deg),
+            traversability_weighted_mean=weighted_mean,
+            traversability_low_percentile=low_percentile,
+            near_field_mean=float(np.mean(near_scores)),
+            near_field_low_percentile=near_low,
+            goal_heading_error_deg=goal_error,
+            goal_penalty=min(1.0, goal_error / maximum_heading),
+            continuity_delta_deg=0.0,
+            continuity_penalty=0.0,
+            curvature_magnitude=min(1.0, abs(float(heading_deg)) / maximum_heading),
+            curvature_penalty=min(1.0, abs(float(heading_deg)) / maximum_heading),
+            near_field_risk_penalty=max(0.0, self.config.near_field_stop_threshold - near_low),
+            final_score_raw=rank,
+            final_score=rank,
+            hard_rejected=hard_rejected,
+            reject_reason="NEAR_FIELD_UNSAFE" if hard_rejected else None,
+            points_uv=points_int,
+        )
+
+    def _genie_cluster_plan(
+        self,
+        score: np.ndarray,
+        valid: np.ndarray,
+        *,
+        target_heading_deg: float,
+        now: float,
+        checkpoint_changed: bool,
+        large_target_change: bool,
+    ) -> tuple[tuple[CandidateScore, ...], CandidateScore | None, bool, str | None, bool, float]:
+        """GeNIE Algorithm 1 in image-space: sample -> top-K -> cluster ->
+        merge -> pick the cluster angularly closest to the GPS goal heading.
+
+        A committed-heading hold/confirm gate (mirroring ``_select_candidate``
+        but keyed on heading instead of a fixed candidate index, since cluster
+        identity is not stable frame to frame) prevents oscillation between
+        angularly-close clusters; the paper's Algorithm 1 itself is a
+        per-frame selection with no live-control temporal behavior specified.
+        """
+
+        shape = score.shape
+        width = shape[1]
+        maximum_heading = max(1.0, float(self.config.maximum_visual_heading_deg))
+        n_candidates = max(5, int(self.config.genie_n_candidates))
+        headings = np.linspace(-maximum_heading, maximum_heading, n_candidates)
+        rng = np.random.default_rng(0)
+
+        fan: list[CandidateScore] = []
+        for heading in headings:
+            exponent = 1.45 + float(
+                rng.uniform(-self.config.genie_curvature_jitter, self.config.genie_curvature_jitter)
+            )
+            candidate = self._build_genie_candidate(
+                score,
+                valid,
+                float(heading),
+                target_heading_deg=target_heading_deg,
+                maximum_heading=maximum_heading,
+                curvature_exponent=exponent,
+            )
+            if candidate is not None:
+                fan.append(candidate)
+
+        near_field_score = max((candidate.near_field_low_percentile for candidate in fan), default=0.0)
+        all_unsafe = bool(fan) and all(candidate.hard_rejected for candidate in fan)
+        near_field_safe = bool(fan) and not all_unsafe and near_field_score >= self.config.near_field_stop_threshold
+
+        safe = [candidate for candidate in fan if not candidate.hard_rejected]
+        top_k = sorted(safe, key=lambda candidate: -candidate.final_score)[: max(1, int(self.config.genie_top_k))]
+
+        fresh_heading: float | None = None
+        fresh_points: np.ndarray | None = None
+        if top_k:
+            paths = np.stack([candidate.points_uv.astype(np.float64) for candidate in top_k])
+            _labels, centers = adaptive_kmeans_paths(paths, k_max=self.config.genie_k_max, seed=0)
+            merge_threshold_px = max(1.0, self.config.genie_merge_threshold_ratio * width)
+            merged = merge_close_path_clusters(centers, threshold_px=merge_threshold_px)
+            merged_headings = [
+                path_heading_from_endpoint_deg(path, width=width, maximum_visual_heading_deg=maximum_heading)
+                for path in merged
+            ]
+            best_index = int(
+                np.argmin([abs(normalize_angle_deg(h - target_heading_deg)) for h in merged_headings])
+            )
+            fresh_heading = merged_headings[best_index]
+            fresh_points = merged[best_index]
+
+        current_heading = self._genie_selected_heading
+        immediate = checkpoint_changed or large_target_change or current_heading is None
+        if (
+            current_heading is not None
+            and self._last_valid_candidate_time is not None
+            and now - self._last_valid_candidate_time > self.config.max_plan_age_sec
+        ):
+            immediate = True
+
+        selected: CandidateScore | None = None
+        switched = False
+        switch_reason: str | None = None
+
+        if immediate:
+            if fresh_heading is not None:
+                selected = self._build_genie_candidate(
+                    score,
+                    valid,
+                    fresh_heading,
+                    target_heading_deg=target_heading_deg,
+                    maximum_heading=maximum_heading,
+                    points_xy=fresh_points,
+                )
+                changed = (
+                    current_heading is None
+                    or abs(normalize_angle_deg(fresh_heading - current_heading)) > 1e-6
+                )
+                self._genie_commit(fresh_heading, now)
+                switched = changed
+                switch_reason = "immediate_reset" if changed else None
+            else:
+                switch_reason = "all_candidates_hard_rejected"
+        else:
+            held = self._build_genie_candidate(
+                score,
+                valid,
+                current_heading,
+                target_heading_deg=target_heading_deg,
+                maximum_heading=maximum_heading,
+            )
+            holding_unsafe = held is None or held.hard_rejected
+            if holding_unsafe and fresh_heading is not None:
+                selected = self._build_genie_candidate(
+                    score,
+                    valid,
+                    fresh_heading,
+                    target_heading_deg=target_heading_deg,
+                    maximum_heading=maximum_heading,
+                    points_xy=fresh_points,
+                )
+                self._genie_commit(fresh_heading, now)
+                switched = True
+                switch_reason = "held_heading_became_unsafe"
+            elif holding_unsafe:
+                switch_reason = "held_heading_unsafe_no_alternative"
+            elif (
+                self._genie_selected_since is not None
+                and now - self._genie_selected_since < self.config.min_candidate_commit_sec
+            ):
+                selected = held
+                self._genie_switch_pending_heading = None
+                self._genie_switch_confirm_count = 0
+            elif fresh_heading is None:
+                selected = held
+            else:
+                heading_delta = abs(normalize_angle_deg(fresh_heading - current_heading))
+                if heading_delta <= self.config.genie_switch_heading_deadband_deg:
+                    selected = held
+                    self._genie_switch_pending_heading = None
+                    self._genie_switch_confirm_count = 0
+                else:
+                    if (
+                        self._genie_switch_pending_heading is not None
+                        and abs(normalize_angle_deg(self._genie_switch_pending_heading - fresh_heading))
+                        <= self.config.genie_switch_heading_deadband_deg
+                    ):
+                        self._genie_switch_confirm_count += 1
+                    else:
+                        self._genie_switch_pending_heading = fresh_heading
+                        self._genie_switch_confirm_count = 1
+                    if self._genie_switch_confirm_count >= self.config.switch_confirm_count:
+                        selected = self._build_genie_candidate(
+                            score,
+                            valid,
+                            fresh_heading,
+                            target_heading_deg=target_heading_deg,
+                            maximum_heading=maximum_heading,
+                            points_xy=fresh_points,
+                        )
+                        self._genie_commit(fresh_heading, now)
+                        switched = True
+                        switch_reason = "angular_selection_confirmed"
+                    else:
+                        selected = held
+                        switch_reason = "switch_pending"
+
+        return tuple(top_k), selected, switched, switch_reason, near_field_safe, float(near_field_score)
+
+    def _genie_commit(self, heading_deg: float, now: float) -> None:
+        if self._genie_selected_heading != heading_deg:
+            self._genie_selected_since = now
+        elif self._genie_selected_since is None:
+            self._genie_selected_since = now
+        self._genie_selected_heading = heading_deg
+        self._genie_switch_pending_heading = None
+        self._genie_switch_confirm_count = 0
+
     def _image_path_for_candidate(
         self,
         candidate: CandidateScore | None,
@@ -785,3 +1089,188 @@ def primitive_sample_weights(rows: np.ndarray, height: int) -> np.ndarray:
     near = np.clip(rows.astype(np.float64) / max(1.0, float(height - 1)), 0.0, 1.0)
     weights = 0.65 + 0.70 * near
     return weights.astype(np.float64)
+
+
+# ---------------------------------------------------------------------------
+# GeNIE-paper-style candidate generation and fusion (Sec III-D, Algorithm 1),
+# ported to image-space. See scripts/06_path_planning.py in the sibling
+# GeNIE_ws workspace for the original BEV/metric-space reproduction this
+# mirrors -- there is no camera calibration here, so paths stay in pixels
+# rather than meters.
+# ---------------------------------------------------------------------------
+
+
+def genie_candidate_points(
+    shape: tuple[int, int],
+    heading_deg: float,
+    *,
+    maximum_visual_heading_deg: float,
+    n_waypoints: int,
+    curvature_exponent: float = 1.45,
+) -> np.ndarray:
+    """Float (x, y) image-space waypoints for one candidate fan path.
+
+    Every candidate uses the same fixed waypoint count and the same
+    parametric row schedule (``t``), so waypoint ``i`` of any two candidates
+    is directly comparable -- this correspondence is what makes the pairwise
+    path distance used by clustering below meaningful.
+    """
+
+    height, width = int(shape[0]), int(shape[1])
+    start_y = min(height - 1, max(0, height * 0.92))
+    end_y = min(start_y, max(0, height * 0.52))
+    t = np.linspace(0.0, 1.0, int(n_waypoints))
+    ys = start_y + (end_y - start_y) * t
+    center_x = (width - 1) / 2.0
+    normalized = float(np.clip(float(heading_deg) / max(1.0, maximum_visual_heading_deg), -1.0, 1.0))
+    lateral = normalized * width * 0.42
+    xs = center_x + lateral * (t**curvature_exponent)
+    return np.stack((xs, ys), axis=1)
+
+
+def sample_score_along_path(
+    score: np.ndarray,
+    valid: np.ndarray,
+    points_xy: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Nearest-pixel sample of ``score``/``valid`` along float waypoints."""
+
+    height, width = score.shape
+    cols = np.clip(np.rint(points_xy[:, 0]).astype(np.int32), 0, width - 1)
+    rows = np.clip(np.rint(points_xy[:, 1]).astype(np.int32), 0, height - 1)
+    return score[rows, cols], valid[rows, cols], rows, cols
+
+
+def path_heading_from_endpoint_deg(
+    path_xy: np.ndarray,
+    *,
+    width: int,
+    maximum_visual_heading_deg: float,
+) -> float:
+    """Invert ``genie_candidate_points``'s endpoint offset back to a heading.
+
+    The curvature exponent only reshapes points before the final waypoint
+    (``t < 1``); at ``t == 1`` the offset is exactly
+    ``normalized * width * 0.42`` regardless of curvature, so this inversion
+    is exact for a single sampled candidate and a good linear approximation
+    for a cluster centroid/merge that averages several such candidates.
+    """
+
+    offset = float(path_xy[-1, 0] - path_xy[0, 0])
+    normalized = float(np.clip(offset / max(1e-6, width * 0.42), -1.0, 1.0))
+    return normalized * max(1.0, maximum_visual_heading_deg)
+
+
+def _pairwise_path_distance(paths: np.ndarray) -> np.ndarray:
+    """Mean per-waypoint Euclidean distance between every pair of paths.
+
+    ``paths``: (n, n_waypoints, 2). Matches GeNIE Sec III-D's definition of
+    path-to-path distance for clustering/merging.
+    """
+
+    diff = paths[:, None, :, :] - paths[None, :, :, :]
+    return np.linalg.norm(diff, axis=-1).mean(axis=-1)
+
+
+def _kmeans_paths(
+    paths: np.ndarray,
+    k: int,
+    *,
+    n_iter: int = 30,
+    seed: int = 0,
+) -> tuple[np.ndarray, np.ndarray]:
+    rng = np.random.default_rng(seed)
+    n = len(paths)
+    centers = paths[rng.choice(n, size=k, replace=False)].copy()
+    labels = np.full(n, -1)
+    for _ in range(n_iter):
+        distances = np.linalg.norm(paths[:, None, :, :] - centers[None, :, :, :], axis=-1).mean(axis=-1)
+        new_labels = distances.argmin(axis=1)
+        if np.array_equal(new_labels, labels):
+            break
+        labels = new_labels
+        for cluster in range(k):
+            members = labels == cluster
+            if members.any():
+                centers[cluster] = paths[members].mean(axis=0)
+    return labels, centers
+
+
+def _silhouette_score_paths(paths: np.ndarray, labels: np.ndarray) -> float:
+    distance = _pairwise_path_distance(paths)
+    unique_labels = np.unique(labels)
+    if len(unique_labels) < 2:
+        return -1.0
+    n = len(paths)
+    silhouette = np.zeros(n)
+    for i in range(n):
+        same = labels == labels[i]
+        same[i] = False
+        a = distance[i, same].mean() if same.any() else 0.0
+        b = min(distance[i, labels == cluster].mean() for cluster in unique_labels if cluster != labels[i])
+        silhouette[i] = 0.0 if max(a, b) == 0 else (b - a) / max(a, b)
+    return float(silhouette.mean())
+
+
+def adaptive_kmeans_paths(
+    paths: np.ndarray,
+    *,
+    k_max: int = 6,
+    seed: int = 0,
+) -> tuple[np.ndarray, np.ndarray]:
+    """k-means over waypoint sequences with k chosen by best silhouette score.
+
+    Mirrors GeNIE's "the number of clusters k is determined by optimizing the
+    silhouette loss" (Sec III-D). Fewer than 3 paths skip clustering entirely.
+    """
+
+    n = len(paths)
+    k_max = min(k_max, n - 1)
+    if n < 3 or k_max < 2:
+        return np.zeros(n, dtype=int), paths.mean(axis=0, keepdims=True)
+
+    best_score = -2.0
+    best_labels = np.zeros(n, dtype=int)
+    best_centers = paths.mean(axis=0, keepdims=True)
+    for k in range(2, k_max + 1):
+        labels, centers = _kmeans_paths(paths, k, seed=seed)
+        if len(np.unique(labels)) < 2:
+            continue
+        score = _silhouette_score_paths(paths, labels)
+        if score > best_score:
+            best_score, best_labels, best_centers = score, labels, centers
+    return best_labels, best_centers
+
+
+def merge_close_path_clusters(centers: np.ndarray, *, threshold_px: float) -> list[np.ndarray]:
+    """Union-find merge of cluster centroids within ``threshold_px`` of each other.
+
+    GeNIE prefers under-merging (treating two genuinely different paths as
+    one is a collision risk) over over-merging (a duplicate cluster is just
+    redundant), so this threshold should stay conservative.
+    """
+
+    k = len(centers)
+    parent = list(range(k))
+
+    def find(x: int) -> int:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a: int, b: int) -> None:
+        root_a, root_b = find(a), find(b)
+        if root_a != root_b:
+            parent[root_a] = root_b
+
+    for i in range(k):
+        for j in range(i + 1, k):
+            distance = np.linalg.norm(centers[i] - centers[j], axis=-1).mean()
+            if distance <= threshold_px:
+                union(i, j)
+
+    groups: dict[int, list[int]] = {}
+    for i in range(k):
+        groups.setdefault(find(i), []).append(i)
+    return [centers[indices].mean(axis=0) for indices in groups.values()]
